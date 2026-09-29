@@ -233,6 +233,7 @@ std::wstring ComputedIslands() {
             continue;
         }
         out += L"app=" + FormatRect(r.islands->app) + L" (" + std::to_wstring(r.islands->appCount) + L" buttons)";
+        if (r.islands->hasSplit) out += L"  startSplit=" + std::to_wstring(r.islands->split);
         for (const RECT& e : r.islands->extras) out += L"  extra=" + FormatRect(e);
         out += r.islands->hasTray ? L"  tray=" + FormatRect(r.islands->tray) : L"  tray=none";
         if (r.islands->hasShowDesktop) out += L"  showDesktop=" + FormatRect(r.islands->showDesktop);

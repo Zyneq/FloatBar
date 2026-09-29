@@ -63,6 +63,11 @@ RECT Padded(const RECT& r, int padding) { return {r.left - padding, r.top, r.rig
 constexpr int kIdApp = 0;
 constexpr int kIdTray = 1;
 constexpr int kIdBar = 2;
+constexpr int kIdStart = 3;
+// Gap between the Start island and the app island ("separate Start").
+constexpr int kStartGapLogicalPx = 8;
+// Overshoot ignored while explorer slides buttons (see GrowTo); icons sit >= 10 px inside their button.
+constexpr int kSlideToleranceLogicalPx = 12;
 constexpr int kIdExtra = 100;  // + index
 
 const Span* FindSpan(const std::vector<Span>& spans, int id) {
@@ -124,6 +129,7 @@ std::vector<Span> Expanded(std::vector<Span> spans, const RECT& full) {
 
 bool SameIslands(const Islands& a, const Islands& b) {
     if (!EqualRect(&a.app, &b.app) || a.hasTray != b.hasTray || (a.hasTray && !EqualRect(&a.tray, &b.tray))) return false;
+    if (a.hasSplit != b.hasSplit || a.split != b.split) return false;
     if (a.extras.size() != b.extras.size()) return false;
     for (size_t i = 0; i < a.extras.size(); ++i) {
         if (!EqualRect(&a.extras[i], &b.extras[i])) return false;
@@ -131,12 +137,24 @@ bool SameIslands(const Islands& a, const Islands& b) {
     return true;
 }
 
-// `fresh`, but with the app and tray islands grown to also cover `held`, so a
-// mid-relayout reading never makes an island shrink and clip a button.
-Islands Merged(const Islands& held, const Islands& fresh) {
+// Grows `held` to cover `fresh`, ignoring overshoots of up to `tolerance` px:
+// explorer's slide animation nudges buttons by a few pixels, which only touches
+// the empty margin around their icons and isn't worth an out-and-back wobble.
+void GrowTo(RECT& held, const RECT& fresh, LONG tolerance) {
+    if (fresh.left < held.left - tolerance) held.left = fresh.left;
+    if (fresh.right > held.right + tolerance) held.right = fresh.right;
+}
+
+// `fresh`, but with the app and tray islands never smaller than `held`, so a
+// mid-relayout reading doesn't make an island shrink and grow again.
+Islands Merged(const Islands& held, const Islands& fresh, LONG tolerance) {
     Islands out = fresh;
-    UnionRect(&out.app, &held.app, &fresh.app);
-    if (held.hasTray && fresh.hasTray) UnionRect(&out.tray, &held.tray, &fresh.tray);
+    out.app = held.app;
+    GrowTo(out.app, fresh.app, tolerance);
+    if (held.hasTray && fresh.hasTray) {
+        out.tray = held.tray;
+        GrowTo(out.tray, fresh.tray, tolerance);
+    }
     return out;
 }
 
@@ -444,9 +462,16 @@ Engine::UpdateResult Engine::OnBounds(BoundsWorker::Reply* raw) {
 bool Engine::Settle(Taskbar& tb, const Islands& fresh) {
     constexpr int kStableReadsToSettle = 2;
     constexpr DWORD kMaxSettleMs = 1500;  // never wait longer than this for explorer
+    const LONG tolerance = MulDiv(kSlideToleranceLogicalPx, static_cast<int>(tb.dpi ? tb.dpi : 96), 96);
     const DWORD now = GetTickCount();
     const bool first = !tb.lastRead;
     const bool changed = first || !SameIslands(fresh, *tb.lastRead);
+    // A button appeared or disappeared: the reading right after it is already
+    // close to the final layout (explorer's slide animation follows it), so it
+    // becomes the new base instead of being merged with the old, wider layout.
+    // Without this a closing app kept its space until the slide had finished.
+    const bool countChanged = !first && (fresh.appCount != tb.lastRead->appCount || fresh.trayCount != tb.lastRead->trayCount ||
+                                         fresh.extras.size() != tb.lastRead->extras.size());
     tb.lastRead = fresh;
 
     if (first || !config_.animate) {
@@ -458,10 +483,10 @@ bool Engine::Settle(Taskbar& tb, const Islands& fresh) {
             tb.settleStart = now;
         }
         tb.stableReads = 0;
-        tb.display = Merged(tb.display, fresh);
+        tb.display = countChanged ? fresh : Merged(tb.display, fresh, tolerance);
     } else if (tb.settling) {
         if (++tb.stableReads >= kStableReadsToSettle) tb.settling = false;
-        tb.display = tb.settling ? Merged(tb.display, fresh) : fresh;
+        tb.display = tb.settling ? Merged(tb.display, fresh, tolerance) : fresh;
     } else {
         tb.display = fresh;
     }
@@ -528,7 +553,15 @@ void Engine::Layout(Taskbar& tb, bool force, const Context& ctx) {
         const RECT bar = {wr.left + padding, wr.top, wr.right - padding, wr.bottom};
         islands.push_back({trimShowDesktop ? WithoutShowDesktop(bar, is) : bar, kIdBar});
     } else {
-        islands.push_back({Padded(is.app, padding), kIdApp});
+        if (config_.separateStart && is.hasSplit) {
+            // Cut a gap where the app buttons begin. Both neighbouring buttons have
+            // empty space beside their icons, so the gap never cuts an icon.
+            const LONG half = scale(kStartGapLogicalPx) / 2;
+            islands.push_back({{is.app.left - padding, is.app.top, is.split - half, is.app.bottom}, kIdStart});
+            islands.push_back({{is.split + half, is.app.top, is.app.right + padding, is.app.bottom}, kIdApp});
+        } else {
+            islands.push_back({Padded(is.app, padding), kIdApp});
+        }
         if (config_.showWidgets) {
             for (size_t i = 0; i < is.extras.size(); ++i) islands.push_back({Padded(is.extras[i], padding), kIdExtra + static_cast<int>(i)});
         }
@@ -645,7 +678,7 @@ void Engine::Retarget(Taskbar& tb, bool snap) {
     distance = std::max({distance, static_cast<LONG>(std::abs(tb.toStyle.marginTop - tb.fromStyle.marginTop)),
                          static_cast<LONG>(std::abs(tb.toStyle.marginBottom - tb.fromStyle.marginBottom)),
                          static_cast<LONG>(std::abs(tb.toStyle.radius - tb.fromStyle.radius))});
-    tb.tweenDuration = std::clamp(distance * kTweenMsPerPixel, kMinTweenMs, kMaxTweenMs);
+    tb.tweenDuration = std::clamp(distance * kTweenMsPerPixel, kMinTweenMs, kMaxTweenMs) * 100.0 / config_.animationSpeed;
     tb.tweenStart = NowMs();
     tb.tweening = true;
 }

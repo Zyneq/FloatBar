@@ -32,6 +32,7 @@ It doesn't replace or patch the taskbar. It reads where the real buttons are and
 |---|---|
 | **Split islands** | App island (Start, search, task view, pinned and running apps) and tray island (hidden-icons chevron, tray icons, clock), each sized to the actual buttons. |
 | **Single bar** | Alternatively, one rounded bar across the whole taskbar, inset from the screen edges. |
+| **Separate Start** | Optionally, Start (and Search / Task View) gets its own island on the left, with the apps in a second island beside it. |
 | **Widgets island** | Buttons that sit apart from the main group (such as Widgets at the far left when centered) get their own island instead of stretching the app island. |
 | **Tray on hover** | Show the tray island always, only while the mouse is over the taskbar, or never. **Win+F2** toggles it. |
 | **Shape** | Corner radius, top gap, bottom gap and side spacing. A negative gap pushes that edge's corners off-screen for a flat, docked edge. |
@@ -108,7 +109,9 @@ Everything is in the Settings window. Settings are saved to `%APPDATA%\FloatBar\
 | Extend when maximised | `fillOnMaximise` | `true` / `false` (`false`) | Per monitor. |
 | Extend during Alt+Tab | `fillOnTaskSwitch` | `true` / `false` (`false`) | |
 | Auto-hide | `autoHide` | `true` / `false` (`false`) | Use this instead of Windows' own auto-hide, which FloatBar doesn't support. |
-| Smooth island animation | `animate` | `true` / `false` (`true`) | Ease island edges to new positions. Off = jump immediately. |
+| Smooth island animation | `animate` | `true` / `false` (`true`) | Move island edges smoothly to new positions. Off = jump immediately. |
+| Animation speed | `animationSpeed` | 25–400 % (100) | 200 = twice as fast, 50 = half speed. |
+| Separate Start | `separateStart` | `true` / `false` (`false`) | Start (plus Search / Task View if shown) becomes its own island, left of the apps. |
 | Hide over fullscreen apps | `hideOverFullscreen` | `true` / `false` (`true`) | Hides the taskbar while the foreground window covers the whole monitor (not the desktop, Alt+Tab or Task View). |
 | Hide the Show Desktop sliver | `hideShowDesktop` | `true` / `false` (`false`) | Islands mode never shows it. This also removes it in full-width and single-bar modes. |
 | Per-monitor mode | `[Monitors]` section | `\\.\DISPLAY2=hidden` | Per monitor device: `normal` (Windows' taskbar) or `hidden`. Monitors not listed follow the settings. In Settings → Monitors, pick the monitor, then the mode. |

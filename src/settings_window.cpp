@@ -24,6 +24,7 @@ enum ControlId : int {
     kIdTrayLabel,
     kIdTray,
     kIdWidgets,
+    kIdSeparateStart,
     kIdSecBehaviour,
     kIdFillMaximise,
     kIdFillTaskSwitch,
@@ -43,6 +44,8 @@ enum ControlId : int {
     kIdBottom,
     kIdPaddingLabel,
     kIdPadding,
+    kIdSpeedLabel,
+    kIdSpeed,
     kIdSecMonitors,
     kIdMonitorLabel,
     kIdMonitor,
@@ -92,6 +95,7 @@ const Slider kSliders[] = {
     {kIdTop, kIdTopLabel, L"Top gap", L"px", kMinMargin, kMaxMargin, &Config::marginTop},
     {kIdBottom, kIdBottomLabel, L"Bottom gap", L"px", kMinMargin, kMaxMargin, &Config::marginBottom},
     {kIdPadding, kIdPaddingLabel, L"Side spacing", L"px", 0, kMaxIslandPadding, &Config::islandPadding},
+    {kIdSpeed, kIdSpeedLabel, L"Animation speed", L"%", kMinAnimationSpeed, kMaxAnimationSpeed, &Config::animationSpeed},
     {kIdOpacity, kIdOpacityLabel, L"Opacity", L"%", 0, 100, &Config::opacity},
     {kIdBorderWidth, kIdBorderWidthLabel, L"Border width", L"px", 0, kMaxBorderWidth, &Config::borderWidth},
     {kIdBorderOpacity, kIdBorderOpacityLabel, L"Border opacity", L"%", 0, 100, &Config::borderOpacity},
@@ -105,6 +109,7 @@ struct Check {
 const Check kChecks[] = {
     {kIdEnabled, &Config::enabled},
     {kIdWidgets, &Config::showWidgets},
+    {kIdSeparateStart, &Config::separateStart},
     {kIdFillMaximise, &Config::fillOnMaximise},
     {kIdFillTaskSwitch, &Config::fillOnTaskSwitch},
     {kIdAutoHide, &Config::autoHide},
@@ -210,6 +215,8 @@ SIZE Layout(UINT dpi) {
     comboRow(kIdModeLabel, kIdMode, x1, y, col);
     comboRow(kIdTrayLabel, kIdTray, x1, y, col);
     place(kIdWidgets, x1, y, col, S(24));
+    y += S(28);
+    place(kIdSeparateStart, x1, y, col, S(24));
     y += S(38);
     place(kIdSecBehaviour, x1, y, col, S(20));
     y += S(26);
@@ -224,7 +231,7 @@ SIZE Layout(UINT dpi) {
     y = top;
     place(kIdSecShape, x2, y, col, S(20));
     y += S(26);
-    for (int id : {kIdRadius, kIdTop, kIdBottom, kIdPadding}) slider(id, x2, y, col);
+    for (int id : {kIdRadius, kIdTop, kIdBottom, kIdPadding, kIdSpeed}) slider(id, x2, y, col);
     y += S(4);
     place(kIdSecMonitors, x2, y, col, S(20));
     y += S(26);
@@ -336,6 +343,7 @@ void CreateControls() {
     AddControl(WC_STATICW, L"Tray island", SS_LEFT, kIdTrayLabel);
     AddCombo(kIdTray, {L"Always shown", L"Shown on hover", L"Hidden"});
     AddControl(WC_BUTTONW, L"Show widgets island (separate buttons)", check, kIdWidgets);
+    AddControl(WC_BUTTONW, L"Separate Start into its own island", check, kIdSeparateStart);
 
     AddControl(WC_STATICW, L"Behaviour", SS_LEFT, kIdSecBehaviour);
     AddControl(WC_BUTTONW, L"Extend taskbar when a window is maximised", check, kIdFillMaximise);
@@ -348,7 +356,7 @@ void CreateControls() {
     AddControl(WC_BUTTONW, L"Verbose debug logging", check, kIdDebugLogging);
 
     AddControl(WC_STATICW, L"Shape", SS_LEFT, kIdSecShape);
-    for (int id : {kIdRadius, kIdTop, kIdBottom, kIdPadding}) AddSlider(id);
+    for (int id : {kIdRadius, kIdTop, kIdBottom, kIdPadding, kIdSpeed}) AddSlider(id);
 
     AddControl(WC_STATICW, L"Monitors", SS_LEFT, kIdSecMonitors);
     AddControl(WC_STATICW, L"Monitor", SS_LEFT, kIdMonitorLabel);
@@ -394,7 +402,8 @@ void UpdateEnabledStates(const Config& c) {
     for (int id : {kIdMode, kIdFillMaximise, kIdFillTaskSwitch, kIdAutoHide, kIdAnimate, kIdHideFullscreen, kIdHideShowDesktop, kIdRadius,
                    kIdTop, kIdBottom, kIdPadding, kIdBackground, kIdBorderWidth, kIdMonitor, kIdMonitorMode})
         EnableWindow(Item(id), on);
-    for (int id : {kIdTray, kIdWidgets}) EnableWindow(Item(id), islands);
+    for (int id : {kIdTray, kIdWidgets, kIdSeparateStart}) EnableWindow(Item(id), islands);
+    EnableWindow(Item(kIdSpeed), on && c.animate);
     for (int id : {kIdColor1, kIdOpacity}) EnableWindow(Item(id), custom);
     for (int id : {kIdColor2, kIdDirection}) EnableWindow(Item(id), gradient);
     for (int id : {kIdBorderColor, kIdBorderOpacity}) EnableWindow(Item(id), border);

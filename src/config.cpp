@@ -118,6 +118,8 @@ Config LoadConfig() {
     ini.Read(L"fillOnTaskSwitch", c.fillOnTaskSwitch);
     ini.Read(L"autoHide", c.autoHide);
     ini.Read(L"animate", c.animate);
+    ini.Read(L"animationSpeed", c.animationSpeed, kMinAnimationSpeed, kMaxAnimationSpeed);
+    ini.Read(L"separateStart", c.separateStart);
     ini.Read(L"hideOverFullscreen", c.hideOverFullscreen);
     ini.Read(L"hideShowDesktop", c.hideShowDesktop);
     ini.ReadEnum(L"background", c.background, kBackgroundNames);
@@ -166,6 +168,8 @@ bool SaveConfig(const Config& c) {
     ini.Write(L"fillOnTaskSwitch", c.fillOnTaskSwitch);
     ini.Write(L"autoHide", c.autoHide);
     ini.Write(L"animate", c.animate);
+    ini.Write(L"animationSpeed", c.animationSpeed);
+    ini.Write(L"separateStart", c.separateStart);
     ini.Write(L"hideOverFullscreen", c.hideOverFullscreen);
     ini.Write(L"hideShowDesktop", c.hideShowDesktop);
     ini.WriteEnum(L"background", c.background, kBackgroundNames);
