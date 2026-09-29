@@ -2,7 +2,7 @@
 
 // The first icon is the exe's icon in Explorer; FloatBar also loads it for the
 // tray and its windows. Built from assets/FloatBar_icon.png by tools/make-icon.ps1.
-1 ICON "@FB_ICON@"
+1 ICON "@CMAKE_SOURCE_DIR@/assets/floatbar.ico"
 
 VS_VERSION_INFO VERSIONINFO
 FILEVERSION     @PROJECT_VERSION_MAJOR@,@PROJECT_VERSION_MINOR@,@PROJECT_VERSION_PATCH@,0

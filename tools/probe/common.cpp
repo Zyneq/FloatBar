@@ -34,12 +34,6 @@ LRESULT CALLBACK DummyProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
 
 double QpcToMs(LONGLONG qpc) { return qpc / QpcPerMs(); }
 
-double NowMs() {
-    LARGE_INTEGER c;
-    QueryPerformanceCounter(&c);
-    return QpcToMs(c.QuadPart);
-}
-
 int Dist(const BYTE* a, const BYTE* b) { return std::abs(a[0] - b[0]) + std::abs(a[1] - b[1]) + std::abs(a[2] - b[2]); }
 
 // ------------------------------------------------------------------ test windows

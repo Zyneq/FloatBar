@@ -18,8 +18,8 @@ constexpr double kStableMs = 150;
 // changed; the "final layout first" phase lasted up to ~270 ms in measurements
 // (bursts of apps opening or closing included).
 constexpr double kMinHoldMs = 450;
-// A reading that lost more than one button at once must stay unchanged this
-// long before it is believed.
+// A reading that lost most of the buttons at once must stay unchanged this long
+// before it is believed.
 constexpr double kDoubtfulStableMs = 600;
 constexpr double kMaxTransitionMs = 2000;
 // A tracked edge reaches each new reading within this long (about one read
@@ -54,13 +54,6 @@ bool Toward(double& value, double goal, double maxStep) {
     return true;
 }
 
-const Span* FindSpan(const std::vector<Span>& spans, int id) {
-    for (const Span& s : spans) {
-        if (s.id == id) return &s;
-    }
-    return nullptr;
-}
-
 }  // namespace
 
 double NowMs() {
@@ -76,17 +69,17 @@ double NowMs() {
 
 // ------------------------------------------------------------------ ReadingFilter
 
-ReadingFilter::Move ReadingFilter::Step(Edge& e, LONG r, Grow grow, bool restart, bool plausible) const {
+bool ReadingFilter::Step(Edge& e, LONG r, Grow grow, bool restart, bool plausible) const {
     // Taken while buttons were being rebuilt: some are missing and others can be
     // anywhere (even at their final slots long before they get there).
-    if (!plausible) return Move::None;
+    if (!plausible) return false;
     if (restart) {
         // The first reading of a change: the final layout if it differs from what
         // is drawn (see the class comment); no information if it doesn't.
         e.final = r;
         e.finalKnown = r != e.value;
     }
-    Move move = Move::None;
+    bool tracked = false;
     const int dir = r > e.prev ? 1 : r < e.prev ? -1 : 0;
     // Explorer's slide: small steps, starting from where the edge already is.
     const bool continuous = std::abs(r - e.prev) <= continuity_ && std::abs(e.prev - e.value) <= continuity_;
@@ -98,7 +91,7 @@ ReadingFilter::Move ReadingFilter::Step(Edge& e, LONG r, Grow grow, bool restart
     if (grow == Grow::None) {
         if (r != e.value && continuous) {
             e.value = r;
-            move = Move::Track;
+            tracked = true;
         }
     } else {
         const int out = grow == Grow::Left ? -1 : 1;  // the way that adds room
@@ -109,29 +102,28 @@ ReadingFilter::Move ReadingFilter::Step(Edge& e, LONG r, Grow grow, bool restart
         const bool neighbourSlides = inside(r) && inside(e.prev) && dir == out && std::abs(r - e.prev) <= continuity_;
         if ((r - e.value) * out > 0) {
             e.value = r;  // more room never cuts an icon
-            move = sliding ? Move::Track : Move::Jump;
+            tracked = sliding;
         } else if (r != e.value && sliding) {
             // Follow the slide, but not past the final layout.
             const LONG v = !e.finalKnown ? r : grow == Grow::Left ? std::min(r, e.final) : std::max(r, e.final);
-            if (v != e.value) move = Move::Track;
+            tracked = v != e.value;
             e.value = v;
         } else if (neighbourSlides && e.value != e.final) {
             // The edge's own button is gone (its icon vanishes before the
             // slide starts) and nothing is drawn beyond the final layout again.
             e.value = e.final;
-            move = Move::Jump;
         }
     }
     if (dir) e.dir = dir;
     e.prev = r;
-    return move;
+    return tracked;
 }
 
 bool ReadingFilter::Settled(double now) const {
     return valid_ && ((!transition_ && now - lastChange_ >= kStableMs) || now - firstAt_ >= kMaxTransitionMs);
 }
 
-void ReadingFilter::InitAll(const Islands& fresh) {
+void ReadingFilter::InitAll(const Islands& fresh, LONG centre2) {
     Init(appLeft_, fresh.app.left);
     Init(appRight_, fresh.app.right);
     Init(trayLeft_, fresh.tray.left);
@@ -140,7 +132,7 @@ void ReadingFilter::InitAll(const Islands& fresh) {
     trusted_ = fresh;
     transition_ = false;
     const LONG sum = fresh.app.left + fresh.app.right;
-    mirror_ = std::abs(sum - centre2_) <= 2 ? sum : 0;
+    mirror_ = std::abs(sum - centre2) <= 2 ? sum : 0;
     settledLeft_ = fresh.app.left;
     settledRight_ = fresh.app.right;
     settledSplit_ = fresh.split;
@@ -149,9 +141,8 @@ void ReadingFilter::InitAll(const Islands& fresh) {
 
 Islands ReadingFilter::Apply(const Islands& fresh, UINT dpi, double now, LONG centre2) {
     tracked_ = {};
-    centre2_ = centre2;
     if (!valid_) {
-        InitAll(fresh);
+        InitAll(fresh, centre2);
         last_ = fresh;
         valid_ = true;
         firstAt_ = lastChange_ = now;
@@ -176,10 +167,9 @@ Islands ReadingFilter::Apply(const Islands& fresh, UINT dpi, double now, LONG ce
     if (restart) lastRestart_ = now;
     if (changed) lastChange_ = now;
 
-    auto track = [](Move m) { return m == Move::Track; };
     const bool startRushes = plausible && appLeft_.prev - fresh.app.left > continuity_;  // Start sliding left fast
-    tracked_.appLeft = track(Step(appLeft_, fresh.app.left, Grow::Left, restart, plausible));
-    tracked_.appRight = track(Step(appRight_, fresh.app.right, Grow::Right, restart, plausible));
+    tracked_.appLeft = Step(appLeft_, fresh.app.left, Grow::Left, restart, plausible);
+    tracked_.appRight = Step(appRight_, fresh.app.right, Grow::Right, restart, plausible);
     // A centred taskbar stays centred: once the right edge has grown to where
     // the last button ends up, Start's slide will end at its mirror image, and
     // the left edge makes that room ahead of it (at once when Start moves fast,
@@ -200,15 +190,15 @@ Islands ReadingFilter::Apply(const Islands& fresh, UINT dpi, double now, LONG ce
         }
     }
     if (fresh.hasTray && trusted_.hasTray) {
-        tracked_.trayLeft = track(Step(trayLeft_, fresh.tray.left, Grow::Left, restart, plausible));
-        tracked_.trayRight = track(Step(trayRight_, fresh.tray.right, Grow::Right, restart, plausible));
+        tracked_.trayLeft = Step(trayLeft_, fresh.tray.left, Grow::Left, restart, plausible);
+        tracked_.trayRight = Step(trayRight_, fresh.tray.right, Grow::Right, restart, plausible);
     } else if (plausible) {
         Init(trayLeft_, fresh.tray.left);
         Init(trayRight_, fresh.tray.right);
     }
     if (fresh.hasSplit && trusted_.hasSplit) {
         const LONG before = split_.prev;
-        tracked_.split = track(Step(split_, fresh.split, Grow::None, restart, plausible));
+        tracked_.split = Step(split_, fresh.split, Grow::None, restart, plausible);
         // Its reading jumps to the final layout, then back to where it was just
         // before the icons start to slide.
         if (restart) splitArmed_ = false;
@@ -226,7 +216,7 @@ Islands ReadingFilter::Apply(const Islands& fresh, UINT dpi, double now, LONG ce
         const bool believable = plausible || quiet >= kDoubtfulStableMs;
         const bool held = now - lastRestart_ >= kMinHoldMs;
         if ((quiet >= kStableMs && believable && (caughtUp || held)) || now - lastRestart_ >= kMaxTransitionMs) {
-            InitAll(fresh);
+            InitAll(fresh, centre2);
             tracked_ = {};  // whatever is left to go is a glide, not a slide being followed
         }
     }
@@ -283,8 +273,8 @@ void Pursuit::SetTarget(const std::vector<Span>& target, const SpanStyle& style,
         return;
     }
     // An edge's speed is set when its goal changes: jumps glide over `glideMs`;
-    // tracked edges catch up with each reading quickly (growing ones faster
-    // still), and never go slower than `trackSpeed`.
+    // tracked edges catch up with each reading quickly (shrinking ones a little
+    // more gently), and never go slower than `trackSpeed`.
     auto retarget = [&](double pos, double& goal, double& speed, double to, bool tracked, int out) {
         if (goal == to) return;
         goal = to;
@@ -293,7 +283,7 @@ void Pursuit::SetTarget(const std::vector<Span>& target, const SpanStyle& style,
         speed = tracked ? std::max(trackSpeed, distance / catchUp) : std::max(distance / glideMs, 1e-3);
     };
     for (const Span& t : target) {
-        auto it = std::find_if(shown_.begin(), shown_.end(), [&](const Drawn& d) { return d.id == t.id; });
+        auto it = std::ranges::find(shown_, t.id, &Drawn::id);
         if (it == shown_.end()) {
             // New island: grows out of its centre.
             const double c = (t.rect.left + t.rect.right) / 2.0;
@@ -307,7 +297,7 @@ void Pursuit::SetTarget(const std::vector<Span>& target, const SpanStyle& style,
         retarget(it->right, it->goalRight, it->speedRight, t.rect.right, t.trackRight, 1);
     }
     for (Drawn& d : shown_) {
-        if (d.leaving || FindSpan(target, d.id)) continue;
+        if (d.leaving || std::ranges::find(target, d.id, &Span::id) != target.end()) continue;
         // Gone from the target: shrinks into its centre.
         d.leaving = true;
         const double c = (d.left + d.right) / 2;

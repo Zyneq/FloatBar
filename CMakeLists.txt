@@ -21,7 +21,6 @@ set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
 add_compile_definitions(UNICODE _UNICODE NOMINMAX _WIN32_WINNT=0x0A00 WINVER=0x0A00 FB_VERSION="${FB_VERSION}")
 add_compile_options($<$<COMPILE_LANGUAGE:CXX>:/W4> $<$<COMPILE_LANGUAGE:CXX>:/permissive-> $<$<COMPILE_LANGUAGE:CXX>:/utf-8> $<$<COMPILE_LANGUAGE:CXX>:/EHsc>)
 
-set(FB_ICON "${CMAKE_SOURCE_DIR}/assets/floatbar.ico")
 configure_file(res/version.rc.in ${CMAKE_BINARY_DIR}/version.rc @ONLY)
 
 file(GLOB SOURCES CONFIGURE_DEPENDS src/*.cpp)
@@ -31,11 +30,8 @@ target_include_directories(floatbar PRIVATE src)
 target_link_libraries(floatbar PRIVATE ole32 oleaut32 uiautomationcore user32 gdi32 advapi32 shcore shell32 comctl32 comdlg32 dwmapi)
 
 # Developer tool (not shipped): per-frame measurement, recorded-reading replay
-# and the end-to-end test suite (tools/probe).
-option(FLOATBAR_TOOLS "Build developer tools" ON)
-if(FLOATBAR_TOOLS)
-    file(GLOB PROBE_SOURCES CONFIGURE_DEPENDS tools/probe/*.cpp)
-    add_executable(floatbar-probe ${PROBE_SOURCES} src/bounds.cpp src/uia_util.cpp src/region.cpp src/config.cpp src/motion.cpp res/app.manifest)
-    target_include_directories(floatbar-probe PRIVATE src)
-    target_link_libraries(floatbar-probe PRIVATE d3d11 dxgi ole32 oleaut32 uiautomationcore user32 gdi32 shell32)
-endif()
+# (CI's test step) and the end-to-end test suite (tools/probe).
+file(GLOB PROBE_SOURCES CONFIGURE_DEPENDS tools/probe/*.cpp)
+add_executable(floatbar-probe ${PROBE_SOURCES} src/bounds.cpp src/uia_util.cpp src/region.cpp src/config.cpp src/motion.cpp res/app.manifest)
+target_include_directories(floatbar-probe PRIVATE src)
+target_link_libraries(floatbar-probe PRIVATE d3d11 dxgi ole32 oleaut32 uiautomationcore user32 gdi32 shell32)

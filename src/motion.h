@@ -46,7 +46,7 @@ struct TrackedEdges {
 // where the icons are drawn, so buttons can jump well outside the last layout
 // (growth: followed), slides get long and fast (followed by their direction,
 // not just small steps), and readings taken while buttons are rebuilt miss
-// buttons (a reading that lost more than one at once is ignored).
+// buttons (a reading that lost most of them at once is ignored).
 // This is about correctness, not looks, so it runs even with FloatBar's own
 // animation turned off.
 class ReadingFilter {
@@ -63,14 +63,10 @@ public:
     // Edges the last reading moved by following explorer's slide (as opposed to
     // a jump): their drawn edge must keep up closely.
     const TrackedEdges& Tracked() const { return tracked_; }
-    void Reset() {
-        valid_ = transition_ = false;
-        tracked_ = {};
-    }
+    void Reset() { *this = {}; }
 
 private:
     enum class Grow { Left, Right, None };
-    enum class Move { None, Jump, Track };
     struct Edge {
         LONG value = 0;           // what the islands use
         LONG final = 0;           // final-layout candidate of the current transition
@@ -83,8 +79,9 @@ private:
         e.finalKnown = false;
         e.dir = 0;
     }
-    void InitAll(const Islands& fresh);  // trust `fresh` completely; ends any transition
-    Move Step(Edge& e, LONG reading, Grow grow, bool restart, bool plausible) const;
+    void InitAll(const Islands& fresh, LONG centre2);  // trust `fresh` completely; ends any transition
+    // Folds a reading into one edge; true if the edge followed explorer's slide.
+    bool Step(Edge& e, LONG reading, Grow grow, bool restart, bool plausible) const;
 
     bool valid_ = false;
     bool transition_ = false;
@@ -93,8 +90,7 @@ private:
     double lastRestart_ = 0;  // when the transition began or the button set last changed
     double lastChange_ = 0;   // when a reading last differed from the one before
     LONG continuity_ = 12;
-    LONG centre2_ = 0;        // the taskbar's left + right
-    LONG mirror_ = 0;         // app left + right when the buttons were last centred, else 0
+    LONG mirror_ = 0;        // app left + right when the buttons were last centred, else 0
     LONG settledLeft_ = 0;    // the app island's edges and split when readings last settled
     LONG settledRight_ = 0;
     LONG settledSplit_ = 0;
@@ -103,6 +99,13 @@ private:
     Islands trusted_;         // the last plausible reading: which buttons exist
     Edge appLeft_, appRight_, trayLeft_, trayRight_, split_;
 };
+
+// A jump (a changed layout, the morph to full width, the tray appearing) glides
+// over kGlideMs at 100 % speed - about as long as explorer's own button slide.
+// An edge that follows the slide reading by reading never moves slower than
+// kTrackSpeed, which is faster than the slide, so it can't fall behind an icon.
+inline constexpr double kGlideMs = 200;
+inline constexpr double kTrackSpeedLogicalPxPerMs = 0.6;
 
 // Moves the drawn islands towards their target at constant speeds, once per
 // display frame: no easing ramps. Every island edge has its own speed, chosen

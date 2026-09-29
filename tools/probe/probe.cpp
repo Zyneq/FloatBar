@@ -39,14 +39,10 @@ namespace {
 
 using namespace probe;
 
-constexpr int kIconBandHalf = 7;  // rows above/below the icon centre that are scanned
-constexpr int kColorThreshold = 70;
-
 // ------------------------------------------------------------------ record
 
 struct FrameSample {
     double ms;
-    UINT accumulated;  // presents merged into this frame
     int iconL, iconR;  // drawn app-icon extent (screen x), -1 if none
     int clipL, clipR;  // app-side clip extent at the icon row; full taskbar if no region
     bool cutL, cutR;   // an icon touches the clip edge (it is being cut)
@@ -214,14 +210,13 @@ int Record(const RecordOptions& o) {
         }
         FrameSample s = {};
         s.ms = QpcToMs(present) - origin;
-        s.accumulated = accumulated;
         s.iconL = s.iconR = -1;
         for (int x = 0; x < bw && x < trayLeft - box.left; ++x) {
             const BYTE* above = &wallpaper[static_cast<size_t>(x) * 4];
             bool icon = false;
             for (int y = iconRow0; y < bh && !icon; ++y) {
                 const BYTE* p = &px[(static_cast<size_t>(y) * bw + x) * 4];
-                icon = Dist(p, bg) > kColorThreshold && Dist(p, above) > kColorThreshold;
+                icon = Dist(p, bg) > kIconTolerance && Dist(p, above) > kIconTolerance;
             }
             if (!icon) continue;
             if (s.iconL < 0) s.iconL = box.left + x;
@@ -364,8 +359,7 @@ bool ReplayFile(const wchar_t* path, bool verbose) {
         return false;
     }
 
-    // The engine's constants at 100 % speed and 96 dpi (engine.cpp).
-    constexpr double kGlideMs = 200, kTrackSpeed = 0.6;
+    // FloatBar's motion at 100 % speed and 96 dpi.
     const fb::SpanStyle flat{0, 0, 0};
     // One display refresh: the typical time between recorded frames.
     std::vector<double> gaps;
@@ -397,7 +391,7 @@ bool ReplayFile(const wchar_t* path, bool verbose) {
             is.appCount = r.count;
             const fb::Islands d = filter.Apply(is, 96, r.at, taskbarLeft + taskbarRight);
             const fb::TrackedEdges tr = filter.Tracked();
-            pursuit.SetTarget({{d.app, 0, tr.appLeft, tr.appRight}}, flat, !started, kGlideMs, kTrackSpeed, r.at);
+            pursuit.SetTarget({{d.app, 0, tr.appLeft, tr.appRight}}, flat, !started, fb::kGlideMs, fb::kTrackSpeedLogicalPxPerMs, r.at);
             started = true;
             if (verbose && r.at > actionMs - 50) {
                 std::printf("  +%7.1f read %ld-%ld #%d -> %ld-%ld%s%s%s\n", r.at - actionMs, r.l, r.r, r.count, d.app.left, d.app.right,

@@ -98,8 +98,6 @@ bool BoundsReader::Locate(HWND taskbar, Handles& out, std::wstring& error) {
         error = L"taskbar frame not found";
         return false;
     }
-    out = {};
-    out.taskbar = taskbar;
     out.frame = frame;
     // Tray buttons are siblings of the frame; searching only those is much
     // cheaper than the whole tree. If a Windows build puts them elsewhere, fall
@@ -141,20 +139,18 @@ BoundsResult BoundsReader::Compute(HWND taskbar) {
     if (!dpi) dpi = 96;
 
     // Use the remembered elements; find them again once if they went stale.
-    auto it = std::find_if(handles_.begin(), handles_.end(), [taskbar](const Handles& h) { return h.taskbar == taskbar; });
     for (int attempt = 0; attempt < 2; ++attempt) {
+        auto it = handles_.find(taskbar);
         if (it == handles_.end()) {
             Handles fresh;
             if (!Locate(taskbar, fresh, result.error)) return result;
-            handles_.push_back(fresh);
-            it = handles_.end() - 1;
+            it = handles_.emplace(taskbar, fresh).first;
         }
-        if (Read(*it, wr, dpi, result)) return result;
+        if (Read(it->second, wr, dpi, result)) return result;
         handles_.erase(it);
-        it = handles_.end();
         result = {};
     }
-    if (result.error.empty()) result.error = L"taskbar elements unavailable";
+    result.error = L"taskbar elements unavailable";
     return result;
 }
 

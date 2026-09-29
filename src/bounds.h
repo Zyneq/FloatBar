@@ -4,6 +4,7 @@
 #include <UIAutomation.h>
 #include <wrl/client.h>
 
+#include <map>
 #include <optional>
 #include <string>
 #include <vector>
@@ -41,7 +42,6 @@ public:
 
 private:
     struct Handles {
-        HWND taskbar = nullptr;
         Microsoft::WRL::ComPtr<IUIAutomationElement> frame;       // TaskbarFrame
         Microsoft::WRL::ComPtr<IUIAutomationElement> trayParent;  // where tray buttons live
         TreeScope trayScope = TreeScope_Children;
@@ -57,7 +57,7 @@ private:
     Microsoft::WRL::ComPtr<IUIAutomationCondition> buttonCond_;
     Microsoft::WRL::ComPtr<IUIAutomationCondition> trayButtonCond_;
     Microsoft::WRL::ComPtr<IUIAutomationCacheRequest> cache_;
-    std::vector<Handles> handles_;
+    std::map<HWND, Handles> handles_;  // per taskbar
 };
 
 }  // namespace fb

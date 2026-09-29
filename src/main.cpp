@@ -91,7 +91,6 @@ void RunUpdate(bool force, bool readBounds = true) {
 
 void OnBounds(fb::BoundsWorker::Reply* reply) {
     const fb::Engine::UpdateResult result = g_engine->OnBounds(reply);
-    if (result.reread) g_engine->RequestTransitionReads();  // back to back while buttons move
     if (result.retry) SetTimer(g_mainWnd, kTimerRetry, kRetryMs, nullptr);
     if (result.recheck) SetTimer(g_mainWnd, kTimerRecheck, kRecheckMs, nullptr);
     fb::settings::RefreshStatus();
@@ -194,7 +193,8 @@ LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
                     if (g_engine->PollHover()) RunUpdate(false, false);
                     break;
                 case kTimerRecheck:
-                    KillTimer(hwnd, kTimerRecheck);
+                case kTimerRetry:
+                    KillTimer(hwnd, wParam);
                     g_engine->MarkAllDirty();
                     g_engine->Update(false, true);
                     break;
@@ -204,11 +204,6 @@ LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
                         KillTimer(hwnd, kTimerRefresh);
                         g_refreshTimer = false;
                     }
-                    break;
-                case kTimerRetry:
-                    KillTimer(hwnd, kTimerRetry);
-                    g_engine->MarkAllDirty();
-                    g_engine->Update(false, true);
                     break;
                 case kTimerPoll:
                     g_engine->MarkAllDirty();  // safety net: read everything once a second
@@ -411,11 +406,8 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
     InitCommonControlsEx(&icc);
 
     // The exe's icon (res/version.rc.in), at the sizes the tray and title bars use.
-    const UINT dpi = GetDpiForSystem();
-    LoadIconWithScaleDown(instance, MAKEINTRESOURCEW(1), GetSystemMetricsForDpi(SM_CXSMICON, dpi), GetSystemMetricsForDpi(SM_CYSMICON, dpi),
-                          &g_smallIcon);
-    LoadIconWithScaleDown(instance, MAKEINTRESOURCEW(1), GetSystemMetricsForDpi(SM_CXICON, dpi), GetSystemMetricsForDpi(SM_CYICON, dpi),
-                          &g_largeIcon);
+    LoadIconMetric(instance, MAKEINTRESOURCEW(1), LIM_SMALL, &g_smallIcon);
+    LoadIconMetric(instance, MAKEINTRESOURCEW(1), LIM_LARGE, &g_largeIcon);
 
     WNDCLASSEXW wc = {sizeof(wc)};
     wc.lpfnWndProc = MainWndProc;

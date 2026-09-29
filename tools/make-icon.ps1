@@ -21,31 +21,12 @@ function Get-Size([int]$size) {
     $g.DrawImage($master, 0, 0, $size, $size)
     $g.Dispose()
     $stream = New-Object System.IO.MemoryStream
-    if ($size -ge 64) {
-        $bmp.Save($stream, [System.Drawing.Imaging.ImageFormat]::Png)
-    } else {
-        # Classic icon image: BITMAPINFOHEADER, 32-bit BGRA rows bottom-up, then an
-        # all-zero AND mask (the alpha channel does the masking).
-        $w = New-Object System.IO.BinaryWriter $stream
-        $maskStride = [int]([Math]::Ceiling($size / 32) * 4)
-        $w.Write([uint32]40); $w.Write([int32]$size); $w.Write([int32]($size * 2))
-        $w.Write([uint16]1); $w.Write([uint16]32); $w.Write([uint32]0)
-        $w.Write([uint32]($size * $size * 4 + $maskStride * $size))
-        $w.Write([int32]0); $w.Write([int32]0); $w.Write([uint32]0); $w.Write([uint32]0)
-        for ($y = $size - 1; $y -ge 0; $y--) {
-            for ($x = 0; $x -lt $size; $x++) {
-                $c = $bmp.GetPixel($x, $y)
-                $w.Write([byte]$c.B); $w.Write([byte]$c.G); $w.Write([byte]$c.R); $w.Write([byte]$c.A)
-            }
-        }
-        $w.Write((New-Object byte[] ($maskStride * $size)))
-        $w.Flush()
-    }
+    $bmp.Save($stream, [System.Drawing.Imaging.ImageFormat]::Png)
     $bmp.Dispose()
     return , $stream.ToArray()
 }
 
-# ICO: a directory of images; the large ones PNG-compressed (Windows reads both).
+# ICO: a directory of PNG images (Windows reads PNG entries at every size).
 $sizes = 16, 20, 24, 32, 40, 48, 64, 128, 256
 $images = foreach ($s in $sizes) { , [byte[]](Get-Size $s) }
 $out = New-Object System.IO.MemoryStream

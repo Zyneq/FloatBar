@@ -23,13 +23,6 @@ constexpr DWORD kHoverLingerMs = 600;
 // the dropped regions measured came within a few ms of a change.
 constexpr double kRefreshAfterChangeMs = 600;
 
-// Motion: a jump (a changed layout, the morph to full width, the tray appearing)
-// glides over kGlideMs at 100 % speed - about as long as explorer's own button
-// slide. An edge that follows the slide reading by reading never moves slower
-// than kTrackSpeed, which is faster than the slide, so it can't fall behind an icon.
-constexpr double kGlideMs = 200;
-constexpr double kTrackSpeedLogicalPxPerMs = 0.6;
-
 enum State : LONG { kShapes = 0, kFilled = 1, kHidden = 2 };
 
 // Island ids (see Span).
@@ -91,11 +84,7 @@ bool IsProcessRunning(const wchar_t* exeName) {
 RECT Padded(const RECT& r, int padding) { return {r.left - padding, r.top, r.right + padding, r.bottom}; }
 
 bool SameSpans(const std::vector<Span>& a, const std::vector<Span>& b) {
-    if (a.size() != b.size()) return false;
-    for (size_t i = 0; i < a.size(); ++i) {
-        if (a[i].id != b[i].id || a[i].rect.left != b[i].rect.left || a[i].rect.right != b[i].rect.right) return false;
-    }
-    return true;
+    return std::ranges::equal(a, b, [](const Span& x, const Span& y) { return x.id == y.id && x.rect.left == y.rect.left && x.rect.right == y.rect.right; });
 }
 
 // The islands stretched until they tile `full` edge to edge: the neighbours meet
@@ -353,12 +342,6 @@ void Engine::Update(bool force, bool readBounds) {
     }
 }
 
-void Engine::RequestTransitionReads() {
-    for (const Taskbar& tb : taskbars_) {
-        if (tb.filter.Transitioning()) worker_.Request(tb.hwnd);
-    }
-}
-
 Engine::UpdateResult Engine::OnBounds(BoundsWorker::Reply* raw) {
     const std::unique_ptr<BoundsWorker::Reply> reply(raw);
     UpdateResult result;
@@ -416,9 +399,11 @@ Engine::UpdateResult Engine::OnBounds(BoundsWorker::Reply* raw) {
                FormatRect(read.islands->app).c_str(), read.islands->appCount, read.islands->split, SpanText(tb->display.app).c_str(),
                tb->display.split, tracked.appLeft ? L" trackL" : L"", tracked.appRight ? L" trackR" : L"", tracked.split ? L" trackS" : L"",
                tb->filter.Transitioning() ? L" (moving)" : L"");
-    result.reread = tb->filter.Transitioning();
-    // Explorer moving buttons is when DWM drops regions, even a region that stays put.
-    if (result.reread) tb->refreshUntil = std::max(tb->refreshUntil, NowMs() + kRefreshAfterChangeMs);
+    if (tb->filter.Transitioning()) {
+        worker_.Request(tb->hwnd);  // read back to back while buttons move
+        // Explorer moving buttons is when DWM drops regions, even a region that stays put.
+        tb->refreshUntil = std::max(tb->refreshUntil, NowMs() + kRefreshAfterChangeMs);
+    }
     Layout(*tb, force, BuildContext(), true);
     return result;
 }
@@ -556,11 +541,9 @@ void Engine::Layout(Taskbar& tb, bool force, const Context& ctx, bool freshReadi
     tb.logical = state;
     Present(tb, force);
 
-    if (state == kShapes && (logicalChanged || !SameSpans(previousTarget, tb.motion.Target()))) {
-        if (logicalChanged || !tb.filter.Transitioning()) {
-            log::Write(L"%s: app=%s (%d) extras=%zu tray=%s dpi=%u", label.c_str(), FormatRect(is.app).c_str(), is.appCount, is.extras.size(),
-                       trayShown ? FormatRect(is.tray).c_str() : L"-", dpi);
-        }
+    if (state == kShapes && (logicalChanged || (!tb.filter.Transitioning() && !SameSpans(previousTarget, tb.motion.Target())))) {
+        log::Write(L"%s: app=%s (%d) extras=%zu tray=%s dpi=%u", label.c_str(), FormatRect(is.app).c_str(), is.appCount, is.extras.size(),
+                   trayShown ? FormatRect(is.tray).c_str() : L"-", dpi);
     } else if (logicalChanged) {
         log::Write(L"%s: %s", label.c_str(), tb.status.c_str());
     }

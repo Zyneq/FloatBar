@@ -36,7 +36,6 @@ public:
 
     struct UpdateResult {
         bool retry = false;    // a read failed transiently: read again soon
-        bool reread = false;   // a taskbar is mid-relayout: read it again right away
         bool recheck = false;  // a relayout just ended: read once more a bit later
     };
 
@@ -59,9 +58,8 @@ public:
     void Update(bool force, bool readBounds);
     // Makes the next Update(readBounds) read every taskbar (poll, display change).
     void MarkAllDirty();
-    // Asks for fresh bounds of the taskbars whose buttons are still moving.
-    void RequestTransitionReads();
     // A read finished (from the worker's message); takes ownership of `reply`.
+    // While that taskbar's buttons still move, it asks for the next read at once.
     UpdateResult OnBounds(BoundsWorker::Reply* reply);
 
     // Mouse tracking for auto-hide and the hover tray. Returns true if any

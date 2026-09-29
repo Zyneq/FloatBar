@@ -11,14 +11,21 @@
 #include <string>
 #include <vector>
 
+#include "motion.h"
+
 namespace probe {
 
-// QueryPerformanceCounter in milliseconds: the same clock as FloatBar's NowMs(),
-// so probe timestamps line up with FloatBar's per-frame log lines.
-double NowMs();
+// FloatBar's own clock (QueryPerformanceCounter in ms), so probe timestamps line
+// up with FloatBar's per-frame log lines; QpcToMs converts DXGI present times.
+using fb::NowMs;
 double QpcToMs(LONGLONG qpc);
 
 int Dist(const BYTE* a, const BYTE* b);  // BGRA colour distance (sum of channel differences)
+
+// Icon pixels: rows this far above and below the taskbar's centre row, differing
+// from the taskbar background by more than this.
+constexpr int kIconBandHalf = 7;
+constexpr int kIconTolerance = 70;
 
 // ---- test windows (separate processes, each with its own taskbar button)
 
@@ -62,6 +69,7 @@ private:
 
 struct Interval {
     int l, r;  // screen x, [l, r)
+    bool operator==(const Interval&) const = default;
 };
 
 // The window region of `hwnd` on screen row `y`, as screen-x intervals.
