@@ -78,6 +78,7 @@ HRESULT BoundsReader::Init() {
     if (FAILED(hr = MakeStringCondition(uia_.Get(), UIA_AutomationIdPropertyId, rules::kTrayButtonAutomationId, &trayButtonCond_))) return hr;
     if (FAILED(hr = MakeIntCondition(uia_.Get(), UIA_ControlTypePropertyId, UIA_ButtonControlTypeId, &buttonCond_))) return hr;
 
+    if (FAILED(hr = uia_->get_RawViewWalker(&rawWalker_))) return hr;
     if (FAILED(hr = uia_->CreateCacheRequest(&cache_))) return hr;
     cache_->AddProperty(UIA_ClassNamePropertyId);
     cache_->AddProperty(UIA_AutomationIdPropertyId);
@@ -86,7 +87,41 @@ HRESULT BoundsReader::Init() {
     return S_OK;
 }
 
-BoundsResult BoundsReader::Compute(HWND taskbar) const {
+bool BoundsReader::Locate(HWND taskbar, Handles& out, std::wstring& error) {
+    ComPtr<IUIAutomationElement> root;
+    if (FAILED(uia_->ElementFromHandle(taskbar, &root)) || !root) {
+        error = L"ElementFromHandle failed";
+        return false;
+    }
+    ComPtr<IUIAutomationElement> frame;
+    if (FAILED(root->FindFirst(TreeScope_Descendants, appSideRootCond_.Get(), &frame)) || !frame) {
+        error = L"taskbar frame not found";
+        return false;
+    }
+    out = {};
+    out.taskbar = taskbar;
+    out.frame = frame;
+    // Tray buttons are siblings of the frame; searching only those is much
+    // cheaper than the whole tree. If a Windows build puts them elsewhere, fall
+    // back to searching everything under the taskbar.
+    ComPtr<IUIAutomationElement> parent;
+    ComPtr<IUIAutomationElementArray> probe;
+    int count = 0;
+    if (SUCCEEDED(rawWalker_->GetParentElement(frame.Get(), &parent)) && parent &&
+        SUCCEEDED(parent->FindAllBuildCache(TreeScope_Children, trayButtonCond_.Get(), cache_.Get(), &probe)) && probe) {
+        probe->get_Length(&count);
+    }
+    if (count > 0) {
+        out.trayParent = parent;
+        out.trayScope = TreeScope_Children;
+    } else {
+        out.trayParent = root;
+        out.trayScope = TreeScope_Descendants;
+    }
+    return true;
+}
+
+BoundsResult BoundsReader::Compute(HWND taskbar) {
     BoundsResult result;
     if (!uia_) {
         result.error = L"UI Automation not initialized";
@@ -105,21 +140,26 @@ BoundsResult BoundsReader::Compute(HWND taskbar) const {
     UINT dpi = GetDpiForWindow(taskbar);
     if (!dpi) dpi = 96;
 
-    ComPtr<IUIAutomationElement> root;
-    HRESULT hr = uia_->ElementFromHandle(taskbar, &root);
-    if (FAILED(hr) || !root) {
-        result.error = L"ElementFromHandle failed";
-        return result;
+    // Use the remembered elements; find them again once if they went stale.
+    auto it = std::find_if(handles_.begin(), handles_.end(), [taskbar](const Handles& h) { return h.taskbar == taskbar; });
+    for (int attempt = 0; attempt < 2; ++attempt) {
+        if (it == handles_.end()) {
+            Handles fresh;
+            if (!Locate(taskbar, fresh, result.error)) return result;
+            handles_.push_back(fresh);
+            it = handles_.end() - 1;
+        }
+        if (Read(*it, wr, dpi, result)) return result;
+        handles_.erase(it);
+        it = handles_.end();
+        result = {};
     }
+    if (result.error.empty()) result.error = L"taskbar elements unavailable";
+    return result;
+}
 
+bool BoundsReader::Read(Handles& h, const RECT& wr, UINT dpi, BoundsResult& result) {
     // --- App side: every visible button under the frame, clustered by gaps ---
-    ComPtr<IUIAutomationElement> frame;
-    hr = root->FindFirst(TreeScope_Descendants, appSideRootCond_.Get(), &frame);
-    if (FAILED(hr) || !frame) {
-        result.error = L"taskbar frame not found";
-        return result;
-    }
-
     struct Button {
         RECT rect;
         bool start;
@@ -127,24 +167,28 @@ BoundsResult BoundsReader::Compute(HWND taskbar) const {
     };
     std::vector<Button> buttons;
     ComPtr<IUIAutomationElementArray> found;
-    if (SUCCEEDED(frame->FindAllBuildCache(TreeScope_Descendants, buttonCond_.Get(), cache_.Get(), &found)) && found) {
-        int length = 0;
-        found->get_Length(&length);
-        for (int i = 0; i < length; ++i) {
-            ComPtr<IUIAutomationElement> e;
-            RECT r;
-            if (FAILED(found->GetElement(i, &e)) || !e || !UsableRect(e.Get(), r)) continue;
-            buttons.push_back({r, CachedString(e.Get(), &IUIAutomationElement::get_CachedAutomationId) == rules::kStartButtonAutomationId,
-                               CachedString(e.Get(), &IUIAutomationElement::get_CachedClassName) == rules::kAppButtonClass});
-        }
+    if (FAILED(h.frame->FindAllBuildCache(TreeScope_Descendants, buttonCond_.Get(), cache_.Get(), &found)) || !found) {
+        return false;  // stale frame element
+    }
+    int length = 0;
+    found->get_Length(&length);
+    for (int i = 0; i < length; ++i) {
+        ComPtr<IUIAutomationElement> e;
+        RECT r;
+        if (FAILED(found->GetElement(i, &e)) || !e || !UsableRect(e.Get(), r)) continue;
+        buttons.push_back({r, CachedString(e.Get(), &IUIAutomationElement::get_CachedAutomationId) == rules::kStartButtonAutomationId,
+                           CachedString(e.Get(), &IUIAutomationElement::get_CachedClassName) == rules::kAppButtonClass});
     }
     if (buttons.empty()) {
         result.error = L"no app buttons found";
-        return result;
+        return length > 0;  // an empty frame may just be stale: look it up again
     }
 
     std::sort(buttons.begin(), buttons.end(), [](const Button& a, const Button& b) { return a.rect.left < b.rect.left; });
-    const LONG gap = MulDiv(rules::kClusterGapLogicalPx, static_cast<int>(dpi), 96);
+    for (const Button& b : buttons) {
+        if (b.app) h.widestApp = std::max(h.widestApp, b.rect.right - b.rect.left);
+    }
+    const LONG gap = std::max(static_cast<LONG>(MulDiv(rules::kClusterGapLogicalPx, static_cast<int>(dpi), 96)), 2 * h.widestApp);
     std::vector<Cluster> clusters;
     for (const Button& b : buttons) {
         if (clusters.empty() || b.rect.left - clusters.back().rect.right > gap) {
@@ -181,10 +225,11 @@ BoundsResult BoundsReader::Compute(HWND taskbar) const {
 
     // --- Tray ---
     ComPtr<IUIAutomationElementArray> trayButtons;
-    if (SUCCEEDED(root->FindAllBuildCache(TreeScope_Descendants, trayButtonCond_.Get(), cache_.Get(), &trayButtons)) && trayButtons) {
-        int length = 0;
-        trayButtons->get_Length(&length);
-        for (int i = 0; i < length; ++i) {
+    if (FAILED(h.trayParent->FindAllBuildCache(h.trayScope, trayButtonCond_.Get(), cache_.Get(), &trayButtons))) return false;
+    if (trayButtons) {
+        int trayLength = 0;
+        trayButtons->get_Length(&trayLength);
+        for (int i = 0; i < trayLength; ++i) {
             ComPtr<IUIAutomationElement> e;
             RECT r;
             if (FAILED(trayButtons->GetElement(i, &e)) || !e || !UsableRect(e.Get(), r)) continue;
@@ -206,16 +251,16 @@ BoundsResult BoundsReader::Compute(HWND taskbar) const {
     InflateRect(&bounds, 2, 2);
     if (!Contains(bounds, islands.app)) {
         result.error = L"app island outside taskbar " + FormatRect(islands.app);
-        return result;
+        return true;
     }
     if (islands.hasTray) {
         if (!Contains(bounds, islands.tray)) {
             result.error = L"tray island outside taskbar " + FormatRect(islands.tray);
-            return result;
+            return true;
         }
         if (Overlaps(islands.app, islands.tray)) {
             result.error = L"app and tray islands overlap";
-            return result;
+            return true;
         }
     }
     for (const Cluster& c : clusters) {
@@ -225,7 +270,7 @@ BoundsResult BoundsReader::Compute(HWND taskbar) const {
     }
 
     result.islands = islands;
-    return result;
+    return true;
 }
 
 }  // namespace fb

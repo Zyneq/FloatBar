@@ -64,6 +64,7 @@ void Write(const wchar_t* format, ...) {
 }
 
 void SetVerbose(bool verbose) { g_verbose = verbose; }
+bool Verbose() { return g_verbose; }
 
 void Debug(const wchar_t* format, ...) {
     if (!g_verbose) return;

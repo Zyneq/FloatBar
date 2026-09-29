@@ -4,6 +4,7 @@
 //   floatbar.exe --background   run without opening settings (used by "Start with Windows")
 //   floatbar.exe --reset        remove any clip from all taskbars and exit
 //   floatbar.exe --dump <file>  write the taskbar's UI Automation tree to <file> and exit
+//   floatbar.exe --config-dir <dir>  use <dir> instead of %APPDATA%\FloatBar (automated tests)
 
 #include <windows.h>
 #include <commctrl.h>
@@ -15,7 +16,6 @@
 #include <string>
 
 #include "app.h"
-#include "app_icon.h"
 #include "config.h"
 #include "debug_report.h"
 #include "engine.h"
@@ -39,11 +39,11 @@ constexpr UINT WM_APP_TRAY = WM_APP + 1;
 constexpr UINT WM_APP_SHOW_SETTINGS = WM_APP + 2;
 constexpr UINT WM_APP_BOUNDS = WM_APP + 3;  // a BoundsWorker::Reply* in lParam
 
-enum TimerId : UINT_PTR { kTimerDebounce = 1, kTimerPoll, kTimerSave, kTimerSettle, kTimerHover, kTimerSettleRead, kTimerRetry };
-constexpr UINT kDebounceMs = 100;      // taskbar content changed
+enum TimerId : UINT_PTR { kTimerDebounce = 1, kTimerPoll, kTimerSave, kTimerSettle, kTimerHover, kTimerRetry, kTimerRecheck, kTimerRefresh };
+constexpr UINT kDebounceMs = 16;       // taskbar content changed (reads run off-thread, so react fast)
 constexpr UINT kWindowEventMs = 30;    // other windows changed (maximise, foreground)
 constexpr UINT kRetryMs = 150;
-constexpr UINT kSettleReadMs = 60;     // re-read cadence while explorer relayouts the buttons
+constexpr UINT kRecheckMs = 250;     // one more read after buttons stopped moving
 constexpr UINT kHoverPollMs = 50;
 constexpr UINT kPollMs = 1000;         // safety net in case an event was missed
 
@@ -58,6 +58,7 @@ HICON g_smallIcon = nullptr;
 HICON g_largeIcon = nullptr;
 bool g_debouncePending = false;
 bool g_pendingBounds = false;  // a pending update must re-read button bounds
+bool g_refreshTimer = false;   // kTimerRefresh is running
 bool g_hotkeyRegistered = false;
 fb::Config g_config;
 fb::Engine* g_engine = nullptr;  // lives in wWinMain so it is released before CoUninitialize
@@ -90,8 +91,9 @@ void RunUpdate(bool force, bool readBounds = true) {
 
 void OnBounds(fb::BoundsWorker::Reply* reply) {
     const fb::Engine::UpdateResult result = g_engine->OnBounds(reply);
-    if (result.reread) SetTimer(g_mainWnd, kTimerSettleRead, kSettleReadMs, nullptr);
+    if (result.reread) g_engine->RequestTransitionReads();  // back to back while buttons move
     if (result.retry) SetTimer(g_mainWnd, kTimerRetry, kRetryMs, nullptr);
+    if (result.recheck) SetTimer(g_mainWnd, kTimerRecheck, kRecheckMs, nullptr);
     fb::settings::RefreshStatus();
 }
 
@@ -191,15 +193,25 @@ LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
                 case kTimerHover:
                     if (g_engine->PollHover()) RunUpdate(false, false);
                     break;
-                case kTimerSettleRead:
-                    KillTimer(hwnd, kTimerSettleRead);
-                    g_engine->RequestSettlingReads();
+                case kTimerRecheck:
+                    KillTimer(hwnd, kTimerRecheck);
+                    g_engine->MarkAllDirty();
+                    g_engine->Update(false, true);
+                    break;
+                case kTimerRefresh:
+                    g_engine->RefreshRegions();
+                    if (!g_engine->NeedsRegionRefresh()) {
+                        KillTimer(hwnd, kTimerRefresh);
+                        g_refreshTimer = false;
+                    }
                     break;
                 case kTimerRetry:
                     KillTimer(hwnd, kTimerRetry);
+                    g_engine->MarkAllDirty();
                     g_engine->Update(false, true);
                     break;
                 case kTimerPoll:
+                    g_engine->MarkAllDirty();  // safety net: read everything once a second
                     RunUpdate(false);
                     break;
                 case kTimerSave:
@@ -243,11 +255,13 @@ LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
             return 0;
 
         case WM_SETTINGCHANGE:
+            g_engine->MarkAllDirty();
             ScheduleUpdate(true);
             return 0;
 
         case WM_DISPLAYCHANGE:
         case WM_DPICHANGED:
+            g_engine->MarkAllDirty();
             ScheduleUpdate(true);
             SetTimer(hwnd, kTimerSettle, 700, nullptr);
             return 0;
@@ -292,6 +306,10 @@ void Dispatch(MSG& msg) {
 void RunMessageLoop() {
     MSG msg;
     for (;;) {
+        if (!g_refreshTimer && g_engine->NeedsRegionRefresh()) {
+            SetTimer(g_mainWnd, kTimerRefresh, fb::Engine::kRegionRefreshMs, nullptr);
+            g_refreshTimer = true;
+        }
         if (!g_engine->Animating()) {
             if (GetMessageW(&msg, nullptr, 0, 0) <= 0) return;
             Dispatch(msg);
@@ -366,6 +384,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
         }
         if (_wcsicmp(argv[i], L"--dump") == 0 && i + 1 < argc) return Dump(argv[i + 1]);
         if (_wcsicmp(argv[i], L"--background") == 0) background = true;
+        if (_wcsicmp(argv[i], L"--config-dir") == 0 && i + 1 < argc) fb::SetConfigDir(argv[++i]);
     }
     LocalFree(argv);
 
@@ -391,9 +410,12 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
     INITCOMMONCONTROLSEX icc = {sizeof(icc), ICC_STANDARD_CLASSES | ICC_BAR_CLASSES};
     InitCommonControlsEx(&icc);
 
+    // The exe's icon (res/version.rc.in), at the sizes the tray and title bars use.
     const UINT dpi = GetDpiForSystem();
-    g_smallIcon = fb::CreateIslandIcon(GetSystemMetricsForDpi(SM_CXSMICON, dpi));
-    g_largeIcon = fb::CreateIslandIcon(GetSystemMetricsForDpi(SM_CXICON, dpi));
+    LoadIconWithScaleDown(instance, MAKEINTRESOURCEW(1), GetSystemMetricsForDpi(SM_CXSMICON, dpi), GetSystemMetricsForDpi(SM_CYSMICON, dpi),
+                          &g_smallIcon);
+    LoadIconWithScaleDown(instance, MAKEINTRESOURCEW(1), GetSystemMetricsForDpi(SM_CXICON, dpi), GetSystemMetricsForDpi(SM_CYICON, dpi),
+                          &g_largeIcon);
 
     WNDCLASSEXW wc = {sizeof(wc)};
     wc.lpfnWndProc = MainWndProc;

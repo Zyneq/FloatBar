@@ -37,7 +37,11 @@ inline constexpr wchar_t kStartButtonAutomationId[] = L"StartButton";
 // Pinned/running app buttons. Everything before the first one in the Start
 // cluster (Start, Search, Task View) can become its own island.
 inline constexpr wchar_t kAppButtonClass[] = L"Taskbar.TaskListButtonAutomationPeer";
-inline constexpr int kClusterGapLogicalPx = 16;
+// While buttons slide (several apps opening or closing at once), neighbours move
+// on slightly different schedules and a closed button leaves its slot empty for
+// a moment: gaps of a whole button plus ~35 px were measured. Only a gap wider
+// than this, and than two of the widest app buttons seen, separates clusters.
+inline constexpr int kClusterGapLogicalPx = 120;
 
 // ---- Tray ----------------------------------------------------------------
 inline constexpr wchar_t kTrayButtonAutomationId[] = L"SystemTrayIcon";

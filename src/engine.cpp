@@ -4,12 +4,11 @@
 #include <tlhelp32.h>
 
 #include <algorithm>
-#include <cmath>
 
-#include "uia_util.h"
 #include "log.h"
 #include "match_rules.h"
 #include "region.h"
+#include "uia_util.h"
 
 namespace fb {
 namespace {
@@ -20,7 +19,27 @@ constexpr int kFailuresBeforeUnclip = 3;
 // How long the taskbar stays revealed after the mouse leaves it.
 constexpr DWORD kHoverLingerMs = 600;
 
+// How long after a region change it keeps being re-sent (see NeedsRegionRefresh);
+// the dropped regions measured came within a few ms of a change.
+constexpr double kRefreshAfterChangeMs = 600;
+
+// Motion: a jump (a changed layout, the morph to full width, the tray appearing)
+// glides over kGlideMs at 100 % speed - about as long as explorer's own button
+// slide. An edge that follows the slide reading by reading never moves slower
+// than kTrackSpeed, which is faster than the slide, so it can't fall behind an icon.
+constexpr double kGlideMs = 200;
+constexpr double kTrackSpeedLogicalPxPerMs = 0.6;
+
 enum State : LONG { kShapes = 0, kFilled = 1, kHidden = 2 };
+
+// Island ids (see Span).
+constexpr int kIdApp = 0;
+constexpr int kIdTray = 1;
+constexpr int kIdBar = 2;
+constexpr int kIdStart = 3;
+constexpr int kIdExtra = 100;  // + index
+// Gap between the Start island and the app island ("separate Start").
+constexpr int kStartGapLogicalPx = 8;
 
 std::wstring Label(HWND hwnd, bool primary) {
     return (primary ? L"primary " : L"secondary ") + FormatHwnd(hwnd);
@@ -57,59 +76,27 @@ BOOL CALLBACK CollectMaximised(HWND hwnd, LPARAM lParam) {
     return TRUE;
 }
 
-RECT Padded(const RECT& r, int padding) { return {r.left - padding, r.top, r.right + padding, r.bottom}; }
-
-// Island ids (see Span).
-constexpr int kIdApp = 0;
-constexpr int kIdTray = 1;
-constexpr int kIdBar = 2;
-constexpr int kIdStart = 3;
-// Gap between the Start island and the app island ("separate Start").
-constexpr int kStartGapLogicalPx = 8;
-// Overshoot ignored while explorer slides buttons (see GrowTo); icons sit >= 10 px inside their button.
-constexpr int kSlideToleranceLogicalPx = 12;
-constexpr int kIdExtra = 100;  // + index
-
-const Span* FindSpan(const std::vector<Span>& spans, int id) {
-    for (const Span& s : spans) {
-        if (s.id == id) return &s;
+bool IsProcessRunning(const wchar_t* exeName) {
+    HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+    if (snapshot == INVALID_HANDLE_VALUE) return false;
+    PROCESSENTRY32W entry = {sizeof(entry)};
+    bool found = false;
+    for (BOOL ok = Process32FirstW(snapshot, &entry); ok && !found; ok = Process32NextW(snapshot, &entry)) {
+        found = _wcsicmp(entry.szExeFile, exeName) == 0;
     }
-    return nullptr;
+    CloseHandle(snapshot);
+    return found;
 }
 
-// Same islands at the same horizontal positions (height comes from the style).
+RECT Padded(const RECT& r, int padding) { return {r.left - padding, r.top, r.right + padding, r.bottom}; }
+
 bool SameSpans(const std::vector<Span>& a, const std::vector<Span>& b) {
     if (a.size() != b.size()) return false;
-    for (const Span& s : a) {
-        const Span* t = FindSpan(b, s.id);
-        if (!t || t->rect.left != s.rect.left || t->rect.right != s.rect.right) return false;
+    for (size_t i = 0; i < a.size(); ++i) {
+        if (a[i].id != b[i].id || a[i].rect.left != b[i].rect.left || a[i].rect.right != b[i].rect.right) return false;
     }
     return true;
 }
-
-bool SameStyle(const SpanStyle& a, const SpanStyle& b) {
-    return a.marginTop == b.marginTop && a.marginBottom == b.marginBottom && a.radius == b.radius;
-}
-
-// Island motion is linear in time (constant speed, no ease ramps), sampled
-// once per display frame. The duration follows the distance, within limits.
-constexpr double kTweenMsPerPixel = 0.3;
-constexpr double kMinTweenMs = 120;
-constexpr double kMaxTweenMs = 280;
-
-double NowMs() {
-    static const double ticksPerMs = [] {
-        LARGE_INTEGER f;
-        QueryPerformanceFrequency(&f);
-        return static_cast<double>(f.QuadPart) / 1000.0;
-    }();
-    LARGE_INTEGER now;
-    QueryPerformanceCounter(&now);
-    return static_cast<double>(now.QuadPart) / ticksPerMs;
-}
-
-LONG Lerp(LONG a, LONG b, double t) { return a + static_cast<LONG>(std::lround((b - a) * t)); }
-int Lerp(int a, int b, double t) { return a + static_cast<int>(std::lround((b - a) * t)); }
 
 // The islands stretched until they tile `full` edge to edge: the neighbours meet
 // halfway across each gap. With zero margins and radius this looks exactly like
@@ -125,37 +112,6 @@ std::vector<Span> Expanded(std::vector<Span> spans, const RECT& full) {
         spans[i + 1].rect.left = meet;
     }
     return spans;
-}
-
-bool SameIslands(const Islands& a, const Islands& b) {
-    if (!EqualRect(&a.app, &b.app) || a.hasTray != b.hasTray || (a.hasTray && !EqualRect(&a.tray, &b.tray))) return false;
-    if (a.hasSplit != b.hasSplit || a.split != b.split) return false;
-    if (a.extras.size() != b.extras.size()) return false;
-    for (size_t i = 0; i < a.extras.size(); ++i) {
-        if (!EqualRect(&a.extras[i], &b.extras[i])) return false;
-    }
-    return true;
-}
-
-// Grows `held` to cover `fresh`, ignoring overshoots of up to `tolerance` px:
-// explorer's slide animation nudges buttons by a few pixels, which only touches
-// the empty margin around their icons and isn't worth an out-and-back wobble.
-void GrowTo(RECT& held, const RECT& fresh, LONG tolerance) {
-    if (fresh.left < held.left - tolerance) held.left = fresh.left;
-    if (fresh.right > held.right + tolerance) held.right = fresh.right;
-}
-
-// `fresh`, but with the app and tray islands never smaller than `held`, so a
-// mid-relayout reading doesn't make an island shrink and grow again.
-Islands Merged(const Islands& held, const Islands& fresh, LONG tolerance) {
-    Islands out = fresh;
-    out.app = held.app;
-    GrowTo(out.app, fresh.app, tolerance);
-    if (held.hasTray && fresh.hasTray) {
-        out.tray = held.tray;
-        GrowTo(out.tray, fresh.tray, tolerance);
-    }
-    return out;
 }
 
 // Cuts the Show Desktop sliver off whichever end of `span` it sits at.
@@ -190,22 +146,6 @@ std::wstring MonitorKey(HMONITOR monitor) {
     mi.cbSize = sizeof(mi);
     return GetMonitorInfoW(monitor, &mi) ? std::wstring(mi.szDevice) : std::wstring();
 }
-
-namespace {
-
-bool IsProcessRunning(const wchar_t* exeName) {
-    HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
-    if (snapshot == INVALID_HANDLE_VALUE) return false;
-    PROCESSENTRY32W entry = {sizeof(entry)};
-    bool found = false;
-    for (BOOL ok = Process32FirstW(snapshot, &entry); ok && !found; ok = Process32NextW(snapshot, &entry)) {
-        found = _wcsicmp(entry.szExeFile, exeName) == 0;
-    }
-    CloseHandle(snapshot);
-    return found;
-}
-
-}  // namespace
 
 Engine* Engine::s_instance = nullptr;
 
@@ -309,11 +249,25 @@ bool Engine::IsTaskbar(HWND hwnd) const {
     return false;
 }
 
+Engine::Taskbar* Engine::Find(HWND hwnd) {
+    for (Taskbar& tb : taskbars_) {
+        if (tb.hwnd == hwnd) return &tb;
+    }
+    return nullptr;
+}
+
 void CALLBACK Engine::ExplorerEventProc(HWINEVENTHOOK, DWORD, HWND hwnd, LONG idObject, LONG, DWORD, DWORD) {
     if (!s_instance || !hwnd || idObject == OBJID_CURSOR || idObject == OBJID_CARET) return;
-    // explorer.exe also hosts File Explorer windows; only react to the taskbars.
-    if (!s_instance->IsTaskbar(GetAncestor(hwnd, GA_ROOT))) return;
+    // explorer.exe also hosts File Explorer windows; only react to the taskbars,
+    // and only re-read the one that changed (reads are the scarce resource).
+    Taskbar* tb = s_instance->Find(GetAncestor(hwnd, GA_ROOT));
+    if (!tb) return;
+    tb->dirty = true;
     if (s_instance->callbacks_.taskbarChanged) s_instance->callbacks_.taskbarChanged();
+}
+
+void Engine::MarkAllDirty() {
+    for (Taskbar& tb : taskbars_) tb.dirty = true;
 }
 
 void CALLBACK Engine::GlobalEventProc(HWINEVENTHOOK, DWORD event, HWND hwnd, LONG idObject, LONG idChild, DWORD, DWORD) {
@@ -390,17 +344,18 @@ void Engine::Update(bool force, bool readBounds) {
     log::Debug(L"update force=%d bounds=%d fg=%s shellUi=%d taskSwitch=%d maximisedMonitors=%zu fullscreenMonitors=%zu", force,
                readBounds, ctx.foregroundClass.c_str(), ctx.shellUi, ctx.taskSwitch, ctx.maximised.size(), ctx.fullscreen.size());
     for (Taskbar& tb : taskbars_) {
-        if (readBounds) {
+        if (readBounds && (force || tb.dirty)) {
             worker_.Request(tb.hwnd);
+            tb.dirty = false;
             if (force) tb.forcePending = true;
         }
-        if (tb.islands && IsWindow(tb.hwnd)) Layout(tb, force, ctx);
+        if (tb.islands && IsWindow(tb.hwnd)) Layout(tb, force, ctx, false);
     }
 }
 
-void Engine::RequestSettlingReads() {
+void Engine::RequestTransitionReads() {
     for (const Taskbar& tb : taskbars_) {
-        if (tb.settling) worker_.Request(tb.hwnd);
+        if (tb.filter.Transitioning()) worker_.Request(tb.hwnd);
     }
 }
 
@@ -412,14 +367,11 @@ Engine::UpdateResult Engine::OnBounds(BoundsWorker::Reply* raw) {
 
     const std::wstring label = Label(tb->hwnd, tb->primary);
     const BoundsResult& read = reply->result;
-    log::Debug(L"%s: bounds read in %lu ms: %s", label.c_str(), reply->ms,
-               read.islands ? (L"app " + FormatRect(read.islands->app) + L", " + std::to_wstring(read.islands->extras.size()) +
-                               L" extra, tray " + (read.islands->hasTray ? FormatRect(read.islands->tray) : L"-")).c_str()
-                            : read.error.c_str());
     const bool force = tb->forcePending;
     tb->forcePending = false;
 
     if (!read.islands) {
+        log::Debug(L"%s: bounds read in %lu ms: %s", label.c_str(), reply->ms, read.error.c_str());
         ++tb->failures;
         if (tb->lastError != read.error) {
             log::Write(L"%s: bounds unavailable: %s", label.c_str(), read.error.c_str());
@@ -430,8 +382,7 @@ Engine::UpdateResult Engine::OnBounds(BoundsWorker::Reply* raw) {
             return result;
         }
         tb->islands.reset();
-        tb->lastRead.reset();
-        tb->settling = false;
+        tb->filter.Reset();
         if (tb->applied || force) {
             ClearRegion(tb->hwnd);
             if (tb->applied) log::Write(L"%s: falling back to unclipped taskbar", label.c_str());
@@ -441,11 +392,10 @@ Engine::UpdateResult Engine::OnBounds(BoundsWorker::Reply* raw) {
         GetWindowRect(tb->hwnd, &tb->wr);
         tb->dpi = GetDpiForWindow(tb->hwnd) ? GetDpiForWindow(tb->hwnd) : 96;
         tb->state = tb->logical = kFilled;
-        tb->fillWhenSettled = tb->tweening = false;
+        tb->fillWhenSettled = false;
         tb->trimShowDesktop = false;
         tb->fillSpan = tb->wr;
-        tb->shown.clear();
-        tb->target.clear();
+        tb->motion.Clear();
         SyncLayers(*tb);
         tb->status = L"unclipped – " + read.error;
         return result;
@@ -454,53 +404,33 @@ Engine::UpdateResult Engine::OnBounds(BoundsWorker::Reply* raw) {
     tb->failures = 0;
     tb->lastError.clear();
     tb->islands = *read.islands;
-    result.reread = Settle(*tb, *read.islands);
-    Layout(*tb, force, BuildContext());
+    const bool wasMoving = tb->filter.Transitioning();
+    RECT wr = {};
+    GetWindowRect(tb->hwnd, &wr);
+    tb->display = tb->filter.Apply(*read.islands, GetDpiForWindow(tb->hwnd), NowMs(), wr.left + wr.right);
+    // UI Automation reports explorer's last slide pixel late; look once more.
+    // The same confirms that the buttons stood still before the first clip.
+    result.recheck = (wasMoving && !tb->filter.Transitioning()) || (!tb->applied && !tb->filter.Settled(NowMs()));
+    const TrackedEdges& tracked = tb->filter.Tracked();
+    log::Debug(L"%s: bounds read in %lu ms: app %s #%d split %ld -> %s split %ld%s%s%s%s", label.c_str(), reply->ms,
+               FormatRect(read.islands->app).c_str(), read.islands->appCount, read.islands->split, SpanText(tb->display.app).c_str(),
+               tb->display.split, tracked.appLeft ? L" trackL" : L"", tracked.appRight ? L" trackR" : L"", tracked.split ? L" trackS" : L"",
+               tb->filter.Transitioning() ? L" (moving)" : L"");
+    result.reread = tb->filter.Transitioning();
+    // Explorer moving buttons is when DWM drops regions, even a region that stays put.
+    if (result.reread) tb->refreshUntil = std::max(tb->refreshUntil, NowMs() + kRefreshAfterChangeMs);
+    Layout(*tb, force, BuildContext(), true);
     return result;
 }
 
-bool Engine::Settle(Taskbar& tb, const Islands& fresh) {
-    constexpr int kStableReadsToSettle = 2;
-    constexpr DWORD kMaxSettleMs = 1500;  // never wait longer than this for explorer
-    const LONG tolerance = MulDiv(kSlideToleranceLogicalPx, static_cast<int>(tb.dpi ? tb.dpi : 96), 96);
-    const DWORD now = GetTickCount();
-    const bool first = !tb.lastRead;
-    const bool changed = first || !SameIslands(fresh, *tb.lastRead);
-    // A button appeared or disappeared: the reading right after it is already
-    // close to the final layout (explorer's slide animation follows it), so it
-    // becomes the new base instead of being merged with the old, wider layout.
-    // Without this a closing app kept its space until the slide had finished.
-    const bool countChanged = !first && (fresh.appCount != tb.lastRead->appCount || fresh.trayCount != tb.lastRead->trayCount ||
-                                         fresh.extras.size() != tb.lastRead->extras.size());
-    tb.lastRead = fresh;
-
-    if (first || !config_.animate) {
-        tb.settling = false;
-        tb.display = fresh;
-    } else if (changed) {
-        if (!tb.settling) {
-            tb.settling = true;
-            tb.settleStart = now;
-        }
-        tb.stableReads = 0;
-        tb.display = countChanged ? fresh : Merged(tb.display, fresh, tolerance);
-    } else if (tb.settling) {
-        if (++tb.stableReads >= kStableReadsToSettle) tb.settling = false;
-        tb.display = tb.settling ? Merged(tb.display, fresh, tolerance) : fresh;
-    } else {
-        tb.display = fresh;
-    }
-    if (tb.settling && now - tb.settleStart > kMaxSettleMs) {
-        tb.settling = false;
-        tb.display = fresh;
-    }
-    return tb.settling;
-}
-
-void Engine::Layout(Taskbar& tb, bool force, const Context& ctx) {
+void Engine::Layout(Taskbar& tb, bool force, const Context& ctx, bool freshReading) {
     const std::wstring label = Label(tb.hwnd, tb.primary);
-    // Shape decisions use the settled view; the sliver comes from the latest reading.
-    Islands is = tb.lastRead ? tb.display : *tb.islands;
+    if (!tb.applied && !tb.filter.Settled(NowMs())) {
+        tb.status = L"waiting for the taskbar buttons to settle";
+        return;
+    }
+    // Shapes follow the filtered view; the sliver comes from the latest reading.
+    Islands is = tb.display;
     is.hasShowDesktop = tb.islands->hasShowDesktop;
     is.showDesktop = tb.islands->showDesktop;
 
@@ -546,6 +476,8 @@ void Engine::Layout(Taskbar& tb, bool force, const Context& ctx) {
 
     // The islands this taskbar would show in islands mode. They are also the
     // start/end point of the morph to and from full width.
+    // Edges that just followed explorer's slide (only meaningful right after a read).
+    const TrackedEdges tr = freshReading ? tb.filter.Tracked() : TrackedEdges{};
     const RECT fillSpan = trimShowDesktop ? WithoutShowDesktop(wr, is) : wr;
     std::vector<Span> islands;
     bool trayShown = false;
@@ -555,18 +487,19 @@ void Engine::Layout(Taskbar& tb, bool force, const Context& ctx) {
     } else {
         if (config_.separateStart && is.hasSplit) {
             // Cut a gap where the app buttons begin. Both neighbouring buttons have
-            // empty space beside their icons, so the gap never cuts an icon.
+            // empty space beside their icons, so a settled gap never cuts an icon
+            // (while it slides it leads its readings; see ReadingFilter).
             const LONG half = scale(kStartGapLogicalPx) / 2;
-            islands.push_back({{is.app.left - padding, is.app.top, is.split - half, is.app.bottom}, kIdStart});
-            islands.push_back({{is.split + half, is.app.top, is.app.right + padding, is.app.bottom}, kIdApp});
+            islands.push_back({{is.app.left - padding, is.app.top, is.split - half, is.app.bottom}, kIdStart, tr.appLeft, tr.split});
+            islands.push_back({{is.split + half, is.app.top, is.app.right + padding, is.app.bottom}, kIdApp, tr.split, tr.appRight});
         } else {
-            islands.push_back({Padded(is.app, padding), kIdApp});
+            islands.push_back({Padded(is.app, padding), kIdApp, tr.appLeft, tr.appRight});
         }
         if (config_.showWidgets) {
             for (size_t i = 0; i < is.extras.size(); ++i) islands.push_back({Padded(is.extras[i], padding), kIdExtra + static_cast<int>(i)});
         }
         trayShown = is.hasTray && (config_.trayMode == TrayMode::Show || (config_.trayMode == TrayMode::Hover && revealed));
-        if (trayShown) islands.push_back({Padded(is.tray, padding), kIdTray});
+        if (trayShown) islands.push_back({Padded(is.tray, padding), kIdTray, tr.trayLeft, tr.trayRight});
     }
 
     switch (state) {
@@ -586,110 +519,67 @@ void Engine::Layout(Taskbar& tb, bool force, const Context& ctx) {
     // else (first frame, hidden, forced refresh, DPI or resolution change) snaps.
     const bool logicalChanged = tb.logical != state;
     const bool canAnimate = config_.animate && !force && tb.applied && EqualRect(&tb.wr, &wr) && tb.dpi == dpi;
-    const std::vector<Span> previousTarget = tb.target;
+    const std::vector<Span> previousTarget = tb.motion.Target();
     tb.wr = wr;
     tb.dpi = dpi;
     tb.trimShowDesktop = trimShowDesktop;
     tb.showDesktop = is.showDesktop;
     tb.fillSpan = fillSpan;
     constexpr SpanStyle kFlat{0, 0, 0};
+    const double glideMs = kGlideMs * 100.0 / config_.animationSpeed;
+    const double minSpeed = kTrackSpeedLogicalPxPerMs * dpi / 96.0;  // for tracked edges only
+    const double now = NowMs();
 
     if (state == kHidden) {
         tb.state = kHidden;
-        tb.fillWhenSettled = tb.tweening = false;
-        tb.shown.clear();
-        tb.target.clear();
+        tb.fillWhenSettled = false;
+        tb.motion.Clear();
     } else if (state == kFilled) {
-        tb.target = Expanded(islands, fillSpan);
-        tb.targetStyle = kFlat;
+        const std::vector<Span> expanded = Expanded(islands, fillSpan);
         if (canAnimate && tb.state == kShapes) {
             // Morph out: stretch the islands edge to edge and flatten them, then
-            // hand over to the real full-width taskbar when the tween ends.
+            // hand over to the real full-width taskbar once they arrive.
             tb.fillWhenSettled = true;
-            Retarget(tb, false);
+            tb.motion.SetTarget(expanded, kFlat, false, glideMs, minSpeed, now);
         } else {
             tb.state = kFilled;
             tb.fillWhenSettled = false;
-            Retarget(tb, true);
+            tb.motion.SetTarget(expanded, kFlat, true, glideMs, minSpeed, now);
         }
     } else {
         const bool snap = !canAnimate || tb.state == kHidden;
-        if (!snap && tb.state == kFilled) {
-            // Morph in: start from the stretched, flat islands.
-            tb.shown = Expanded(islands, fillSpan);
-            tb.style = kFlat;
-            tb.tweening = false;
-        }
+        if (!snap && tb.state == kFilled) tb.motion.Place(Expanded(islands, fillSpan), kFlat);  // morph in from full width
         tb.state = kShapes;
         tb.fillWhenSettled = false;
-        tb.target = islands;
-        tb.targetStyle = style;
-        Retarget(tb, snap);
+        tb.motion.SetTarget(islands, style, snap, glideMs, minSpeed, now);
     }
     tb.logical = state;
     Present(tb, force);
 
-    if (state == kShapes && (logicalChanged || !SameSpans(previousTarget, tb.target))) {
-        log::Write(L"%s: app=%s (%d) extras=%zu tray=%s dpi=%u%s", label.c_str(), FormatRect(is.app).c_str(), is.appCount,
-                   is.extras.size(), trayShown ? FormatRect(is.tray).c_str() : L"-", dpi, tb.settling ? L" (settling)" : L"");
+    if (state == kShapes && (logicalChanged || !SameSpans(previousTarget, tb.motion.Target()))) {
+        if (logicalChanged || !tb.filter.Transitioning()) {
+            log::Write(L"%s: app=%s (%d) extras=%zu tray=%s dpi=%u", label.c_str(), FormatRect(is.app).c_str(), is.appCount, is.extras.size(),
+                       trayShown ? FormatRect(is.tray).c_str() : L"-", dpi);
+        }
     } else if (logicalChanged) {
         log::Write(L"%s: %s", label.c_str(), tb.status.c_str());
     }
 }
 
-void Engine::Retarget(Taskbar& tb, bool snap) {
-    if (snap) {
-        tb.shown = tb.target;
-        tb.style = tb.targetStyle;
-        tb.tweening = false;
-        return;
-    }
-    // Already on the way there (or there)? Then keep going undisturbed.
-    std::vector<Span> heading;
-    for (const Span& s : tb.to) {
-        if (FindSpan(tb.target, s.id)) heading.push_back(s);
-    }
-    if (tb.tweening && SameSpans(heading, tb.target) && SameStyle(tb.toStyle, tb.targetStyle)) return;
-    if (!tb.tweening && SameSpans(tb.shown, tb.target) && SameStyle(tb.style, tb.targetStyle)) return;
-
-    // New tween from exactly what is on screen now. Islands that appear grow out
-    // of their centre; islands that go away shrink into theirs.
-    tb.from = tb.shown;
-    tb.fromStyle = tb.style;
-    tb.to = tb.target;
-    tb.toStyle = tb.targetStyle;
-    for (const Span& t : tb.target) {
-        if (FindSpan(tb.from, t.id)) continue;
-        const LONG c = (t.rect.left + t.rect.right) / 2;
-        tb.from.push_back({{c, t.rect.top, c, t.rect.bottom}, t.id});
-    }
-    for (const Span& f : tb.from) {
-        if (FindSpan(tb.to, f.id)) continue;
-        const LONG c = (f.rect.left + f.rect.right) / 2;
-        tb.to.push_back({{c, f.rect.top, c, f.rect.bottom}, f.id});
-    }
-
-    // Constant speed: the duration follows the longest edge move.
-    LONG distance = 0;
-    for (const Span& f : tb.from) {
-        const Span* t = FindSpan(tb.to, f.id);
-        distance = std::max({distance, std::abs(t->rect.left - f.rect.left), std::abs(t->rect.right - f.rect.right)});
-    }
-    distance = std::max({distance, static_cast<LONG>(std::abs(tb.toStyle.marginTop - tb.fromStyle.marginTop)),
-                         static_cast<LONG>(std::abs(tb.toStyle.marginBottom - tb.fromStyle.marginBottom)),
-                         static_cast<LONG>(std::abs(tb.toStyle.radius - tb.fromStyle.radius))});
-    tb.tweenDuration = std::clamp(distance * kTweenMsPerPixel, kMinTweenMs, kMaxTweenMs) * 100.0 / config_.animationSpeed;
-    tb.tweenStart = NowMs();
-    tb.tweening = true;
+void Engine::Present(Taskbar& tb, bool force) {
+    ApplyRegion(tb, force);
+    // After the region: SetWindowRgn waits for explorer, so layers updated first
+    // were shown a frame ahead of the island they outline.
+    SyncLayers(tb);
 }
 
-void Engine::Present(Taskbar& tb, bool force) {
-    SyncLayers(tb);
-
-    Key key = {tb.state, tb.wr.left, tb.wr.top, tb.wr.right, tb.wr.bottom, tb.style.marginTop, tb.style.marginBottom, tb.style.radius,
+void Engine::ApplyRegion(Taskbar& tb, bool force) {
+    const std::vector<Span> shown = tb.motion.Shown();
+    const SpanStyle style = tb.motion.ShownStyle();
+    Key key = {tb.state, tb.wr.left, tb.wr.top, tb.wr.right, tb.wr.bottom, style.marginTop, style.marginBottom, style.radius,
                tb.trimShowDesktop ? 1 : 0, tb.fillSpan.left, tb.fillSpan.right};
     if (tb.state == kShapes) {
-        for (const Span& s : tb.shown) key.insert(key.end(), {s.id, s.rect.left, s.rect.right});
+        for (const Span& s : shown) key.insert(key.end(), {s.id, s.rect.left, s.rect.right});
     }
 
     // Something else removed our region while the state stayed the same.
@@ -697,6 +587,7 @@ void Engine::Present(Taskbar& tb, bool force) {
     if (!force && tb.applied == key && !regionLost) return;
 
     bool ok = true;
+    const double started = NowMs();
     switch (tb.state) {
         case kFilled:
             if (tb.trimShowDesktop) ok = ApplyFullExcept(tb.hwnd, tb.wr, tb.showDesktop);
@@ -705,10 +596,8 @@ void Engine::Present(Taskbar& tb, bool force) {
         case kHidden: ok = HideTaskbar(tb.hwnd); break;
         default: {
             std::vector<RECT> rects;
-            for (const Span& s : tb.shown) {
-                if (s.rect.right > s.rect.left) rects.push_back(s.rect);
-            }
-            ok = ApplySpans(tb.hwnd, tb.wr, rects, tb.style);
+            for (const Span& s : shown) rects.push_back(s.rect);
+            ok = ApplySpans(tb.hwnd, tb.wr, rects, style);
             break;
         }
     }
@@ -718,6 +607,18 @@ void Engine::Present(Taskbar& tb, bool force) {
         return;
     }
     if (regionLost) log::Write(L"%s: region was reset by something else, reapplied", Label(tb.hwnd, tb.primary).c_str());
+    tb.regionAt = NowMs();
+    tb.refreshUntil = std::max(tb.refreshUntil, tb.regionAt + kRefreshAfterChangeMs);
+    if (log::Verbose()) {
+        // One line per drawn frame, stamped with the high-resolution clock
+        // (the same clock tools/probe uses, so the two line up).
+        std::wstring spans;
+        if (tb.state == kShapes) {
+            for (const Span& s : shown) spans += L" " + std::to_wstring(s.id) + L":" + SpanText(s.rect);
+        }
+        log::Debug(L"%s: frame t=%.1f (%.1f ms) state %ld r=%d%s%s", Label(tb.hwnd, tb.primary).c_str(), started, NowMs() - started, tb.state,
+                   style.radius, spans.c_str(), force ? L" forced" : L"");
+    }
     tb.applied = key;
 }
 
@@ -734,14 +635,13 @@ bool Engine::FillVisible() {
 
 void Engine::SyncLayers(Taskbar& tb) {
     std::vector<RECT> shapes;
-    int radius = tb.style.radius;
+    const SpanStyle style = tb.motion.ShownStyle();
+    int radius = style.radius;
     if (tb.state == kFilled) {
         shapes.push_back({tb.fillSpan.left - tb.wr.left, 0, tb.fillSpan.right - tb.wr.left, tb.wr.bottom - tb.wr.top});
         radius = 0;
     } else if (tb.state == kShapes) {
-        for (const Span& s : tb.shown) {
-            if (s.rect.right > s.rect.left) shapes.push_back(SpanToWindowRect(tb.wr, s.rect, tb.style));
-        }
+        for (const Span& s : tb.motion.Shown()) shapes.push_back(SpanToWindowRect(tb.wr, s.rect, style));
     }
 
     auto sync = [&](std::unique_ptr<Backdrop>& layer, bool wanted, Backdrop::Layer kind) {
@@ -758,9 +658,28 @@ void Engine::SyncLayers(Taskbar& tb) {
     sync(tb.border, BorderActive(), Backdrop::Layer::Border);
 }
 
+bool Engine::NeedsRegionRefresh() const {
+    const double now = NowMs();
+    for (const Taskbar& tb : taskbars_) {
+        if (tb.applied && tb.state != kFilled && now < tb.refreshUntil) return true;
+    }
+    return false;
+}
+
+void Engine::RefreshRegions() {
+    const double now = NowMs();
+    for (Taskbar& tb : taskbars_) {
+        if (!tb.applied || tb.state == kFilled || now >= tb.refreshUntil || !IsWindow(tb.hwnd)) continue;
+        if (now - tb.regionAt < kRegionRefreshMs) continue;  // set just now anyway
+        const double until = tb.refreshUntil;
+        ApplyRegion(tb, true);
+        tb.refreshUntil = until;  // re-sending is not a change
+    }
+}
+
 bool Engine::Animating() const {
     for (const Taskbar& tb : taskbars_) {
-        if (tb.tweening) return true;
+        if (tb.motion.Moving() || tb.fillWhenSettled) return true;
     }
     return false;
 }
@@ -768,31 +687,15 @@ bool Engine::Animating() const {
 void Engine::Animate() {
     const double now = NowMs();
     for (Taskbar& tb : taskbars_) {
-        if (!tb.tweening) continue;
-        const double p = std::clamp((now - tb.tweenStart) / tb.tweenDuration, 0.0, 1.0);
-        if (p >= 1.0) {
-            tb.tweening = false;
-            tb.shown = tb.target;
-            tb.style = tb.targetStyle;
+        const bool moved = tb.motion.Step(now);
+        if (!tb.motion.Moving() && tb.fillWhenSettled) {
             // Stretched edge to edge and flat: now it is the full-width taskbar.
-            if (tb.fillWhenSettled) {
-                tb.state = kFilled;
-                tb.fillWhenSettled = false;
-            }
-        } else {
-            tb.shown.clear();
-            for (const Span& f : tb.from) {
-                const Span* t = FindSpan(tb.to, f.id);
-                RECT r = f.rect;
-                r.left = Lerp(f.rect.left, t->rect.left, p);
-                r.right = Lerp(f.rect.right, t->rect.right, p);
-                tb.shown.push_back({r, f.id});
-            }
-            tb.style.marginTop = Lerp(tb.fromStyle.marginTop, tb.toStyle.marginTop, p);
-            tb.style.marginBottom = Lerp(tb.fromStyle.marginBottom, tb.toStyle.marginBottom, p);
-            tb.style.radius = Lerp(tb.fromStyle.radius, tb.toStyle.radius, p);
+            tb.state = kFilled;
+            tb.fillWhenSettled = false;
+            Present(tb, false);
+        } else if (moved) {
+            Present(tb, false);
         }
-        Present(tb, false);
     }
 }
 
@@ -802,21 +705,13 @@ void Engine::ClearAll() {
         tb.applied.reset();
         tb.fill.reset();
         tb.border.reset();
-        tb.shown.clear();
-        tb.target.clear();
-        tb.lastRead.reset();
+        tb.motion.Clear();
+        tb.filter.Reset();
         tb.logical = -1;
         tb.state = kShapes;
-        tb.fillWhenSettled = tb.tweening = tb.settling = false;
+        tb.fillWhenSettled = false;
     }
     ClearAllTaskbars();
-}
-
-Engine::Taskbar* Engine::Find(HWND hwnd) {
-    for (Taskbar& tb : taskbars_) {
-        if (tb.hwnd == hwnd) return &tb;
-    }
-    return nullptr;
 }
 
 std::vector<MonitorEntry> Engine::Monitors() const {

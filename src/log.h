@@ -11,6 +11,7 @@ void Write(const wchar_t* format, ...);
 
 // Verbose lines are only written after the user opted in (Settings → Verbose debug logging).
 void SetVerbose(bool verbose);
+bool Verbose();
 void Debug(const wchar_t* format, ...);
 
 }  // namespace fb::log

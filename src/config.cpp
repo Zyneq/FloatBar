@@ -84,15 +84,21 @@ private:
     std::wstring path_;
 };
 
+std::wstring g_configDirOverride;
+
 }  // namespace
 
+void SetConfigDir(const std::wstring& dir) { g_configDirOverride = dir; }
+
 std::wstring ConfigDir() {
-    PWSTR appData = nullptr;
-    std::wstring dir;
-    if (SUCCEEDED(SHGetKnownFolderPath(FOLDERID_RoamingAppData, KF_FLAG_CREATE, nullptr, &appData))) {
-        dir = std::wstring(appData) + L"\\FloatBar";
+    std::wstring dir = g_configDirOverride;
+    if (dir.empty()) {
+        PWSTR appData = nullptr;
+        if (SUCCEEDED(SHGetKnownFolderPath(FOLDERID_RoamingAppData, KF_FLAG_CREATE, nullptr, &appData))) {
+            dir = std::wstring(appData) + L"\\FloatBar";
+        }
+        CoTaskMemFree(appData);
     }
-    CoTaskMemFree(appData);
     if (!dir.empty()) CreateDirectoryW(dir.c_str(), nullptr);
     return dir;
 }

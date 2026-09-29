@@ -74,8 +74,10 @@ inline constexpr int kMaxMargin = 20;
 inline constexpr int kMaxCornerRadius = 30;
 inline constexpr int kMaxIslandPadding = 40;
 
-// %APPDATA%\FloatBar (created if missing).
+// %APPDATA%\FloatBar (created if missing), or the --config-dir given on the
+// command line (used by the automated tests so they never touch real settings).
 std::wstring ConfigDir();
+void SetConfigDir(const std::wstring& dir);
 std::wstring ConfigPath();
 
 // %APPDATA%\FloatBar\config.ini, read and written with the Win32 profile API.

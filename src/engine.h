@@ -12,6 +12,7 @@
 #include "bounds.h"
 #include "bounds_worker.h"
 #include "config.h"
+#include "motion.h"
 #include "region.h"
 
 namespace fb {
@@ -24,14 +25,6 @@ struct MonitorEntry {
     std::wstring label;  // "Main taskbar (1920×1080)"
 };
 
-// One rounded island in screen coordinates (only left/right matter; the height
-// comes from the style). `id` says which island it is, so animation can match an
-// island across frames and grow or shrink islands that appear or disappear.
-struct Span {
-    RECT rect{};
-    int id = 0;
-};
-
 // Owns the taskbar list, the WinEvent hooks and the applied regions. Runs on
 // the UI thread; UI Automation reads happen on a BoundsWorker thread.
 class Engine {
@@ -42,8 +35,9 @@ public:
     };
 
     struct UpdateResult {
-        bool retry = false;   // a read failed transiently: read again soon
-        bool reread = false;  // a taskbar is mid-relayout: read it again quickly until it settles
+        bool retry = false;    // a read failed transiently: read again soon
+        bool reread = false;   // a taskbar is mid-relayout: read it again right away
+        bool recheck = false;  // a relayout just ended: read once more a bit later
     };
 
     ~Engine();
@@ -59,11 +53,14 @@ public:
     bool TaskbarsChanged() const;
 
     // Re-evaluates every taskbar with the last known bounds (cheap) and, with
-    // `readBounds`, also asks the worker for fresh bounds. `force` redraws even
-    // when nothing changed and skips animation.
+    // `readBounds`, also asks the worker for fresh bounds of the taskbars that
+    // changed (all of them with `force`). `force` also redraws even when nothing
+    // changed and skips animation.
     void Update(bool force, bool readBounds);
-    // Asks for fresh bounds of the taskbars that are still settling.
-    void RequestSettlingReads();
+    // Makes the next Update(readBounds) read every taskbar (poll, display change).
+    void MarkAllDirty();
+    // Asks for fresh bounds of the taskbars whose buttons are still moving.
+    void RequestTransitionReads();
     // A read finished (from the worker's message); takes ownership of `reply`.
     UpdateResult OnBounds(BoundsWorker::Reply* reply);
 
@@ -72,10 +69,19 @@ public:
     bool NeedsHoverPolling() const;
     bool PollHover();
 
-    // Time-based island animation. While Animating(), call Animate() once per
-    // display frame (after DwmFlush); it positions everything for "now".
+    // Island animation. While Animating(), call Animate() once per display frame
+    // (after DwmFlush); it positions everything for "now".
     bool Animating() const;
     void Animate();
+
+    // Now and then DWM shows a taskbar unclipped right after its region changed
+    // while explorer is busy (the region stays set) until the region is set
+    // again; seen lasting up to 460 ms. Re-sending it to an idle taskbar never
+    // did that (44,000 calls measured). While NeedsRegionRefresh(), call
+    // RefreshRegions() every kRegionRefreshMs.
+    static constexpr UINT kRegionRefreshMs = 50;
+    bool NeedsRegionRefresh() const;
+    void RefreshRegions();
 
     void ClearAll();
     std::wstring Status() const;
@@ -87,25 +93,19 @@ private:
     struct Taskbar {
         HWND hwnd = nullptr;
         bool primary = false;
-        std::optional<Islands> islands;  // last good bounds
+        std::optional<Islands> islands;  // latest good reading
+        Islands display;                 // the same, filtered so it never cuts an icon
+        ReadingFilter filter;
         std::optional<Key> applied;
         int failures = 0;
         bool forcePending = false;       // a forced update is waiting for its read
+        bool dirty = true;               // explorer reported a change: read it next time
         std::wstring lastError;
         std::wstring status;
         bool hovered = false;
         DWORD lastInside = 0;
 
-        // Settling: while explorer relayouts (it passes through intermediate
-        // layouts), `display` only grows to cover every reading, and takes the
-        // real reading once two reads in a row agree.
-        std::optional<Islands> lastRead;
-        Islands display;
-        bool settling = false;
-        int stableReads = 0;
-        DWORD settleStart = 0;
-
-        // What is on screen right now, so animation frames can redraw it.
+        // What is drawn right now.
         LONG logical = -1;             // the decided state
         LONG state = 0;                // the drawn state (islands while morphing to/from full width)
         bool fillWhenSettled = false;  // morphing towards full width
@@ -114,16 +114,9 @@ private:
         UINT dpi = 96;
         bool trimShowDesktop = false;
         RECT showDesktop{};
-        std::vector<Span> target;      // where the islands should end up
-        SpanStyle targetStyle{};
-        std::vector<Span> shown;       // where they are drawn this frame
-        SpanStyle style{};             // drawn style
-
-        // Linear tween from `from` to `to` (which also holds shrinking islands).
-        bool tweening = false;
-        double tweenStart = 0, tweenDuration = 0;  // milliseconds
-        std::vector<Span> from, to;
-        SpanStyle fromStyle{}, toStyle{};
+        Pursuit motion;                // drawn islands, moving towards their target
+        double regionAt = 0;           // when the region was last set (NowMs)
+        double refreshUntil = 0;       // re-send it until then (explorer busy, or just changed)
 
         std::unique_ptr<Backdrop> fill;    // custom background, below the taskbar
         std::unique_ptr<Backdrop> border;  // outline, above the taskbar
@@ -139,13 +132,11 @@ private:
     };
 
     Context BuildContext() const;
-    void Layout(Taskbar& tb, bool force, const Context& ctx);
-    // Folds a fresh reading into tb.display; returns true while still settling.
-    bool Settle(Taskbar& tb, const Islands& fresh);
-    // Moves towards tb.target/targetStyle: snaps, or (re)starts a tween from what is shown.
-    void Retarget(Taskbar& tb, bool snap);
-    // Applies tb.shown (region + layers) in tb.state; skips unchanged output unless `force`.
+    // `freshReading`: called right after a read (edge tracking hints are current).
+    void Layout(Taskbar& tb, bool force, const Context& ctx, bool freshReading);
+    // Applies what tb.motion shows (region + layers) in tb.state; skips an unchanged region unless `force`.
     void Present(Taskbar& tb, bool force);
+    void ApplyRegion(Taskbar& tb, bool force);
     void SyncLayers(Taskbar& tb);
     bool FillVisible();
     bool BorderActive() const { return config_.borderWidth > 0 && config_.borderOpacity > 0; }

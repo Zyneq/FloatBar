@@ -49,6 +49,12 @@ jobs:
       - name: Build
         run: cmake --build build --config Release
 
+      # Real Windows taskbar readings (recorded frame by frame, tools/probe/fixtures)
+      # replayed through the motion code: the islands must never cut an icon.
+      - name: Test
+        shell: pwsh
+        run: build/Release/floatbar-probe.exe replay (Get-ChildItem tools/probe/fixtures/*.csv).FullName
+
       # ---- Code signing via SignPath Foundation (tags only, approved by hand) ----
       - name: Upload unsigned exe for signing
         id: unsigned

@@ -1,3 +1,5 @@
+<img src="assets/readme-icon.png" width="96" height="96" alt="FloatBar icon" align="right">
+
 # FloatBar
 
 **A floating, split taskbar for Windows 11. Done in one small exe, no installer, no dependencies.**
@@ -32,7 +34,7 @@ It doesn't replace or patch the taskbar. It reads where the real buttons are and
 |---|---|
 | **Split islands** | App island (Start, search, task view, pinned and running apps) and tray island (hidden-icons chevron, tray icons, clock), each sized to the actual buttons. |
 | **Single bar** | Alternatively, one rounded bar across the whole taskbar, inset from the screen edges. |
-| **Separate Start** | Optionally, Start (and Search / Task View) gets its own island on the left, with the apps in a second island beside it. |
+| **Separate Start** | Optionally, Start (and Search / Task View) gets its own island, with a small gap before the apps. (It stays where Windows puts it; see [limitations](#known-limitations).) |
 | **Widgets island** | Buttons that sit apart from the main group (such as Widgets at the far left when centered) get their own island instead of stretching the app island. |
 | **Tray on hover** | Show the tray island always, only while the mouse is over the taskbar, or never. **Win+F2** toggles it. |
 | **Shape** | Corner radius, top gap, bottom gap and side spacing. A negative gap pushes that edge's corners off-screen for a flat, docked edge. |
@@ -91,6 +93,7 @@ FloatBar then lives in the notification area:
 | `floatbar.exe --background` | Start without opening Settings (used by *Start with Windows*) |
 | `floatbar.exe --reset` | Remove the clip from every taskbar and exit |
 | `floatbar.exe --dump <file>` | Write the taskbar's UI Automation tree and the computed islands to `<file>` and exit |
+| `floatbar.exe --config-dir <dir>` | Keep settings and logs in `<dir>` instead of `%APPDATA%\FloatBar` (the test suite uses this) |
 
 ## Settings reference
 
@@ -165,10 +168,10 @@ FloatBar then draws the island backgrounds itself, antialiased and with per-pixe
 ```
 
 1. **Finding the buttons.** FloatBar asks UI Automation (the accessibility API screen readers use) for the taskbar's element tree and reads the on-screen rectangle of every button. That's why it doesn't care about alignment, app count or scaling: it measures, it doesn't estimate. Every identifier it relies on is kept in one file, [`src/match_rules.h`](src/match_rules.h), so a Windows update that renames something is a one-line fix.
-2. **Building islands.** App-side buttons are grouped wherever there's a visible gap; the group containing Start is the app island. Tray buttons form the tray island. If the result looks wrong (empty, outside the taskbar, overlapping), FloatBar leaves the taskbar unclipped rather than guess.
+2. **Building islands.** App-side buttons are grouped wherever there's a wide gap (more than two buttons' width, so the brief holes buttons leave while they slide don't count); the group containing Start is the app island. Tray buttons form the tray island. If the result looks wrong (empty, outside the taskbar, overlapping), FloatBar leaves the taskbar unclipped rather than guess.
 3. **Clipping.** A rounded rectangle is built for each island, they're merged, and the result goes to `SetWindowRgn` on the taskbar window. Clicks in the gaps go through to the desktop. The region is only reapplied when something actually changed.
-4. **Tracking changes.** WinEvent hooks on explorer's process report taskbar changes (new buttons, moves, animations). They're debounced to about 100 ms, with a 1-second polling safety net. Button positions are read on a background thread, so reading never delays drawing. While explorer is still re-laying out its buttons, the islands only grow to cover them; once two readings agree, they move to the final size.
-5. **Animation.** Island edges move linearly in time (constant speed, 120–280 ms depending on distance) and are redrawn once per display refresh (`DwmFlush`), so motion is equally smooth at 60, 144 or 360 Hz. Maximising morphs the islands into the full-width taskbar and back: they stretch edge to edge while the gaps and corner radius shrink to zero. Behaviour options add system-wide hooks for foreground, minimise/maximise and window movement. The `TaskbarCreated` broadcast re-attaches after explorer restarts; display, DPI and settings changes and resume from sleep trigger a re-scan.
+4. **Tracking changes.** WinEvent hooks on explorer's process report taskbar changes; button positions are then read on a background thread every ~11 ms while buttons move, so reading never delays drawing, with a 1-second polling safety net. Explorer's readings can't be taken at face value: measured frame by frame, right after a button is added or removed UI Automation reports the *final* layout while the icons are still drawn at their *old* places, then the buttons snap back one by one and slide, and when several apps open or close together readings arrive in pieces. [`src/motion.h`](src/motion.h) turns this into island edges that never cut an icon: growing is immediate, shrinking follows the slide (on a centred taskbar also its mirror image) and never passes the final layout, and readings taken while buttons are rebuilt are ignored.
+5. **Animation.** Jumps glide at constant speed (200 ms at 100 %), edges that follow explorer's slide keep up with each reading, and everything is redrawn once per display refresh (`DwmFlush`), so motion is equally smooth at 60, 144 or 360 Hz. Maximising morphs the islands into the full-width taskbar and back: they stretch edge to edge while the gaps and corner radius shrink to zero. Behaviour options add system-wide hooks for foreground, minimise/maximise and window movement. The `TaskbarCreated` broadcast re-attaches after explorer restarts; display, DPI and settings changes and resume from sleep trigger a re-scan.
 6. **Safety.** On start, any clip left over from a previous run is cleared first. On exit, sign-out or crash, the full taskbar is restored. `--reset` does the same by hand.
 
 FloatBar doesn't inject into explorer, modify system files, edit the registry (except the optional *Start with Windows* entry under `HKCU\…\Run`), or open network connections.
@@ -202,7 +205,10 @@ To see exactly what FloatBar sees, run `floatbar.exe --dump dump.txt`. The file 
 ## Known limitations
 
 - The clip itself isn't antialiased (a `SetWindowRgn` limit). A border or a [custom background](#custom-colours-gradients-and-smooth-corners) gives smooth corners.
-- Apps can't wrap onto a second row. Button layout belongs to explorer; changing it would require injecting code into explorer, which FloatBar never does. When apps don't fit, Windows' own overflow button (…) appears and gets its place in the app island.
+- Rarely (about once in 3,000 region updates made while explorer is busy, so roughly once every 30 app opens or closes), Windows' compositor draws the taskbar unclipped right after the region changes, although the region stays set, and keeps doing so until the region is set again. FloatBar re-sends the region while explorer is busy and for a moment after, so such a flash lasts a frame or two and never more than about 50 ms. It can't be prevented from outside (RoundedTB has the same class of issue); re-sending to an idle taskbar never triggers it (44,000 calls measured).
+- While islands move, the border can be drawn one frame apart from the island (it is a separate window, and Windows can't update two windows in the same frame).
+- Apps can't wrap onto a second row. Button layout belongs to explorer; changing it would require injecting code into explorer, which FloatBar never does. When apps don't fit, Windows' own overflow button (…) appears and gets its place in the app island. While Windows moves buttons into that menu (about 30 buttons per taskbar), readings slow down and the group is no longer centred, so icons at the edge can be clipped for a few frames.
+- Start can't be moved to the far left while the apps stay centred (as on Windows 10): Windows 11 keeps it in the centred group, and moving it takes code injected into explorer. *Separate Start* can only put a gap after it, and that gap has room for just 7 px of play on each side, so when apps open it can touch the first app's icon for a frame.
 - Windows' own *Automatically hide the taskbar* isn't supported; use FloatBar's Auto-hide instead.
 - The taskbar can't move to the top or sides, and buttons can't be repositioned, because FloatBar only shapes what Windows draws. With left alignment, the app island touches the screen edge.
 - Tooltips, thumbnails, Start, search and flyouts are separate windows and keep their normal look.
@@ -224,7 +230,20 @@ cmake --build build --config Release
 
 C++20 against Win32, UI Automation and other Windows system libraries only. **No third-party code or packages.** Settings use the built-in Windows INI API.
 
-**Releasing:** push a tag such as `v1.2.0`. The workflow builds, hashes, attests and publishes the release.
+**Releasing:** push a tag such as `v1.2.0`. The workflow builds, tests, hashes, attests and publishes the release.
+
+### Testing
+
+The build also produces `floatbar-probe.exe`, a developer tool that measures FloatBar frame by frame on screen (DXGI Desktop Duplication). It isn't shipped.
+
+| Command | What it does |
+|---|---|
+| `floatbar-probe replay tools\probe\fixtures\*.csv` | Replays real taskbar readings, recorded while apps opened and closed (one, a middle one, bursts of 6 and 12), through the motion code and checks every recorded frame: the islands must contain every icon, never reverse, and end exactly on the layout. No desktop needed; CI runs it on every build. |
+| `floatbar-probe suite` | End-to-end tests on the **main monitor**: an isolated FloatBar (its own `--config-dir`, your settings are never touched) through 27 scenarios (opening, closing, bursts, overflow, morphs and animation speeds, separate Start, single bar, tray modes, per-monitor modes, border, Settings window, second instance, `--reset`, auto-hide, tray on hover, fullscreen). Every frame is checked for cut icons, flashes, reversals and jumps, and the settled islands are compared with the buttons. A running FloatBar is closed first and restarted afterwards. `--no-interactive` skips the scenarios that move the mouse or take the focus; `--only a,b` and `--list` pick scenarios. Results, with one CSV line per frame and FloatBar's own per-frame log, go to `%TEMP%\floatbar-suite` (or `--out`). |
+| `floatbar-probe record --action open --count 6 --spacing 120 --csv burst.csv` | Records a new replay fixture (run it with FloatBar closed). |
+| `floatbar-probe trace` | Prints the raw button rectangles while test windows open and close. |
+
+With verbose logging on, FloatBar itself logs every frame it draws (`frame t=…`), stamped with the same clock the probe uses.
 
 ## Project layout
 
@@ -233,7 +252,8 @@ Everything is in `src/`, one flat folder:
 | File | Purpose |
 |---|---|
 | `match_rules.h` | every UIA identifier and window class FloatBar depends on |
-| `bounds.*` | UI Automation → island rectangles, clustering, sanity checks |
+| `bounds.*`, `bounds_worker.*` | UI Automation → island rectangles, clustering, sanity checks; read on a background thread |
+| `motion.*` | turning explorer's readings into edges that never cut an icon, and the per-frame animation |
 | `engine.*` | hooks, state decisions (islands / full / hidden), applying regions |
 | `region.*` | rounded regions, `SetWindowRgn`, taskbar discovery, reset |
 | `backdrop.*` | antialiased background (below the taskbar) and border (above it) windows |
@@ -242,9 +262,9 @@ Everything is in `src/`, one flat folder:
 | `config.*` | `config.ini` load/save |
 | `log.*` | rolling log, opt-in verbose lines |
 | `tree_dump.*`, `debug_report.*` | `--dump` and the consent-gated, redacted debug report |
-| `app_icon.*`, `uia_util.*`, `version.h` | small helpers |
+| `uia_util.*`, `version.h` | small helpers |
 
-`.github/workflows/release.yml` holds the CI build, checksums, provenance and releases.
+`assets/` has the icon (`tools/make-icon.ps1` builds `floatbar.ico` from it), `tools/probe/` the test tool and its recorded fixtures, and `.github/workflows/release.yml` the CI build, test, checksums, provenance and releases.
 
 ## Code signing policy
 
