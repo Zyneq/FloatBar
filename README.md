@@ -1,10 +1,10 @@
 # FloatBar
 
-**A floating, split taskbar for Windows 11: one small exe, no installer, no dependencies.**
+**A floating, split taskbar for Windows 11. Done in one small exe, no installer, no dependencies.**
 
 FloatBar turns the native Windows 11 taskbar into floating, rounded **islands**: one for your apps and one for the tray (icons and clock), with the desktop visible in between. It works with centered and left alignment, any number of open apps, every DPI scale and multiple monitors, and it keeps up with changes as they happen.
 
-It doesn't replace or patch the taskbar. It reads where the real buttons are and clips the real taskbar window around them, so everything keeps working exactly like Windows intends: Start, search, jump lists, drag and drop, thumbnails, tray flyouts.
+It doesn't replace or patch the taskbar. It reads where the real buttons are and clips the real taskbar window around them, so everything keeps working exactly like Windows intends.
 
 ---
 
