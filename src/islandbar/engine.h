@@ -3,12 +3,15 @@
 #include <windows.h>
 
 #include <functional>
+#include <memory>
 #include <optional>
 #include <string>
 #include <vector>
 
 #include "core/bounds.h"
 #include "core/config.h"
+#include "core/region.h"
+#include "islandbar/backdrop.h"
 
 namespace ib {
 
@@ -58,6 +61,7 @@ private:
         std::wstring status;
         bool hovered = false;
         DWORD lastInside = 0;
+        std::unique_ptr<Backdrop> backdrop;  // only with a custom background
     };
 
     // Foreground/maximised state shared by all taskbars during one update.
@@ -65,10 +69,12 @@ private:
         bool shellUi = false;     // Start, search, a flyout or the taskbar itself is focused
         bool taskSwitch = false;  // Alt+Tab or Task View is open
         std::vector<HMONITOR> maximised;
+        std::wstring foregroundClass;  // for verbose logging only
     };
 
     Context BuildContext() const;
     bool UpdateOne(Taskbar& tb, bool force, bool readBounds, const Context& ctx);
+    void SyncBackdrop(Taskbar& tb, LONG state, const RECT& wr, const std::vector<RECT>& spans, const SpanStyle& style, UINT dpi);
     bool IsTaskbar(HWND hwnd) const;
     bool NeedsGlobalHooks() const;
     void InstallGlobalHooks();

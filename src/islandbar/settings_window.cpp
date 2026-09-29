@@ -1,6 +1,7 @@
 #include "islandbar/settings_window.h"
 
 #include <commctrl.h>
+#include <commdlg.h>
 #include <windowsx.h>
 
 #include <iterator>
@@ -14,6 +15,7 @@ constexpr wchar_t kClassName[] = L"IslandBarSettings";
 enum ControlId : int {
     kIdHeader = 100,
     kIdEnabled,
+    // Layout column
     kIdSecLayout,
     kIdModeLabel,
     kIdMode,
@@ -25,6 +27,8 @@ enum ControlId : int {
     kIdFillTaskSwitch,
     kIdAutoHide,
     kIdAutostart,
+    kIdDebugLogging,
+    // Shape column
     kIdSecShape,
     kIdRadiusLabel,
     kIdRadius,
@@ -34,11 +38,31 @@ enum ControlId : int {
     kIdBottom,
     kIdPaddingLabel,
     kIdPadding,
+    // Appearance column
+    kIdSecAppearance,
+    kIdBackgroundLabel,
+    kIdBackground,
+    kIdColorsLabel,
+    kIdColor1,
+    kIdColor2,
+    kIdDirectionLabel,
+    kIdDirection,
+    kIdOpacityLabel,
+    kIdOpacity,
+    kIdBorderWidthLabel,
+    kIdBorderWidth,
+    kIdBorderColorLabel,
+    kIdBorderColor,
+    kIdBorderOpacityLabel,
+    kIdBorderOpacity,
+    kIdAppearanceNote,
+    // Bottom
     kIdSecStatus,
     kIdStatus,
     kIdHint,
     kIdDefaults,
     kIdFolder,
+    kIdDebugReport,
     kIdExit,
     kIdClose,
 };
@@ -47,16 +71,20 @@ struct Slider {
     int id;
     int labelId;
     const wchar_t* text;
+    const wchar_t* unit;
     int min;
     int max;
     int Config::*field;
 };
 
 const Slider kSliders[] = {
-    {kIdRadius, kIdRadiusLabel, L"Corner radius", 0, kMaxCornerRadius, &Config::cornerRadius},
-    {kIdTop, kIdTopLabel, L"Top gap", kMinMargin, kMaxMargin, &Config::marginTop},
-    {kIdBottom, kIdBottomLabel, L"Bottom gap", kMinMargin, kMaxMargin, &Config::marginBottom},
-    {kIdPadding, kIdPaddingLabel, L"Side spacing", 0, kMaxIslandPadding, &Config::islandPadding},
+    {kIdRadius, kIdRadiusLabel, L"Corner radius", L"px", 0, kMaxCornerRadius, &Config::cornerRadius},
+    {kIdTop, kIdTopLabel, L"Top gap", L"px", kMinMargin, kMaxMargin, &Config::marginTop},
+    {kIdBottom, kIdBottomLabel, L"Bottom gap", L"px", kMinMargin, kMaxMargin, &Config::marginBottom},
+    {kIdPadding, kIdPaddingLabel, L"Side spacing", L"px", 0, kMaxIslandPadding, &Config::islandPadding},
+    {kIdOpacity, kIdOpacityLabel, L"Opacity", L"%", 0, 100, &Config::opacity},
+    {kIdBorderWidth, kIdBorderWidthLabel, L"Border width", L"px", 0, kMaxBorderWidth, &Config::borderWidth},
+    {kIdBorderOpacity, kIdBorderOpacityLabel, L"Border opacity", L"%", 0, 100, &Config::borderOpacity},
 };
 
 struct Check {
@@ -72,19 +100,31 @@ const Check kChecks[] = {
     {kIdAutoHide, &Config::autoHide},
 };
 
-// Controls that only make sense while IslandBar is enabled.
-const int kDependsOnEnabled[] = {kIdMode, kIdTray, kIdWidgets, kIdFillMaximise, kIdFillTaskSwitch, kIdAutoHide,
-                                 kIdRadius, kIdTop, kIdBottom, kIdPadding};
+struct Swatch {
+    int id;
+    unsigned long Config::*field;
+};
+
+const Swatch kSwatches[] = {
+    {kIdColor1, &Config::color1},
+    {kIdColor2, &Config::color2},
+    {kIdBorderColor, &Config::borderColor},
+};
 
 HWND g_wnd = nullptr;
 Host g_host;
 HFONT g_font = nullptr;
 HFONT g_sectionFont = nullptr;
 HFONT g_headerFont = nullptr;
+COLORREF g_customColors[16] = {};
 
 HWND Item(int id) { return GetDlgItem(g_wnd, id); }
 
-bool IsSection(int id) { return id == kIdSecLayout || id == kIdSecBehaviour || id == kIdSecShape || id == kIdSecStatus; }
+bool IsSection(int id) {
+    return id == kIdSecLayout || id == kIdSecBehaviour || id == kIdSecShape || id == kIdSecAppearance || id == kIdSecStatus;
+}
+
+bool IsGrayText(int id) { return id == kIdStatus || id == kIdHint || id == kIdAppearanceNote; }
 
 HFONT CreateUiFont(UINT dpi, int weight, float scale) {
     NONCLIENTMETRICSW ncm = {sizeof(ncm)};
@@ -94,10 +134,15 @@ HFONT CreateUiFont(UINT dpi, int weight, float scale) {
     return CreateFontIndirectW(&ncm.lfMessageFont);
 }
 
-void UpdateFonts(UINT dpi) {
+void DeleteFonts() {
     for (HFONT* f : {&g_font, &g_sectionFont, &g_headerFont}) {
         if (*f) DeleteObject(*f);
+        *f = nullptr;
     }
+}
+
+void UpdateFonts(UINT dpi) {
+    DeleteFonts();
     g_font = CreateUiFont(dpi, FW_NORMAL, 1.0f);
     g_sectionFont = CreateUiFont(dpi, FW_SEMIBOLD, 1.0f);
     g_headerFont = CreateUiFont(dpi, FW_SEMIBOLD, 1.5f);
@@ -109,7 +154,7 @@ void UpdateFonts(UINT dpi) {
 }
 
 void SetSliderLabel(const Slider& s, int value) {
-    std::wstring text = std::wstring(s.text) + L": " + std::to_wstring(value) + L" px";
+    std::wstring text = std::wstring(s.text) + L": " + std::to_wstring(value) + L" " + s.unit;
     if (value < 0) text += L" (corners past the edge)";
     SetWindowTextW(Item(s.labelId), text.c_str());
 }
@@ -120,60 +165,97 @@ SIZE Layout(UINT dpi) {
     auto place = [](int id, int x, int y, int w, int h) {
         SetWindowPos(Item(id), nullptr, x, y, w, h, SWP_NOZORDER | SWP_NOACTIVATE);
     };
-    const int pad = S(20), col = S(290), colGap = S(28);
-    const int width = pad * 2 + col * 2 + colGap;
-    const int leftX = pad, rightX = pad + col + colGap;
+    auto slider = [&](int id, int x, int& y, int col) {
+        for (const Slider& s : kSliders) {
+            if (s.id != id) continue;
+            place(s.labelId, x, y, col, S(20));
+            place(s.id, x - S(6), y + S(20), col + S(12), S(30));
+        }
+        y += S(54);
+    };
+    auto comboRow = [&](int labelId, int comboId, int x, int& y, int col) {
+        const int labelW = S(96);
+        place(labelId, x, y + S(4), labelW, S(20));
+        place(comboId, x + labelW, y, col - labelW, S(200));
+        y += S(34);
+    };
+
+    const int pad = S(20), col = S(280), colGap = S(28);
+    const int x1 = pad, x2 = pad + col + colGap, x3 = pad + 2 * (col + colGap);
+    const int width = x3 + col + pad;
 
     int y = S(14);
     place(kIdHeader, pad, y, col, S(32));
-    place(kIdEnabled, rightX, y + S(6), col, S(24));
+    place(kIdEnabled, x2, y + S(6), col, S(24));
     y += S(48);
-    const int columnsTop = y;
+    const int top = y;
 
-    // Left column: layout + behaviour.
-    const int labelW = S(90), comboW = col - labelW;
-    place(kIdSecLayout, leftX, y, col, S(20));
+    // Column 1: layout + behaviour.
+    place(kIdSecLayout, x1, y, col, S(20));
     y += S(26);
-    place(kIdModeLabel, leftX, y + S(4), labelW, S(20));
-    place(kIdMode, leftX + labelW, y, comboW, S(200));
-    y += S(34);
-    place(kIdTrayLabel, leftX, y + S(4), labelW, S(20));
-    place(kIdTray, leftX + labelW, y, comboW, S(200));
-    y += S(34);
-    place(kIdWidgets, leftX, y, col, S(24));
-    y += S(40);
-    place(kIdSecBehaviour, leftX, y, col, S(20));
+    comboRow(kIdModeLabel, kIdMode, x1, y, col);
+    comboRow(kIdTrayLabel, kIdTray, x1, y, col);
+    place(kIdWidgets, x1, y, col, S(24));
+    y += S(38);
+    place(kIdSecBehaviour, x1, y, col, S(20));
     y += S(26);
-    for (int id : {kIdFillMaximise, kIdFillTaskSwitch, kIdAutoHide, kIdAutostart}) {
-        place(id, leftX, y, col, S(24));
+    for (int id : {kIdFillMaximise, kIdFillTaskSwitch, kIdAutoHide, kIdAutostart, kIdDebugLogging}) {
+        place(id, x1, y, col, S(24));
         y += S(28);
     }
-    const int leftBottom = y;
+    int bottom = y;
 
-    // Right column: shape sliders.
-    y = columnsTop;
-    place(kIdSecShape, rightX, y, col, S(20));
+    // Column 2: shape.
+    y = top;
+    place(kIdSecShape, x2, y, col, S(20));
     y += S(26);
-    for (const Slider& s : kSliders) {
-        place(s.labelId, rightX, y, col, S(20));
-        place(s.id, rightX - S(6), y + S(20), col + S(12), S(30));
-        y += S(56);
-    }
+    for (int id : {kIdRadius, kIdTop, kIdBottom, kIdPadding}) slider(id, x2, y, col);
+    bottom = std::max(bottom, y);
 
-    y = std::max(leftBottom, y) + S(12);
+    // Column 3: appearance.
+    y = top;
+    place(kIdSecAppearance, x3, y, col, S(20));
+    y += S(26);
+    comboRow(kIdBackgroundLabel, kIdBackground, x3, y, col);
+    {
+        const int labelW = S(96), sw = S(64), sh = S(26);
+        place(kIdColorsLabel, x3, y + S(4), labelW, S(20));
+        place(kIdColor1, x3 + labelW, y, sw, sh);
+        place(kIdColor2, x3 + labelW + sw + S(8), y, sw, sh);
+        y += S(34);
+    }
+    comboRow(kIdDirectionLabel, kIdDirection, x3, y, col);
+    slider(kIdOpacity, x3, y, col);
+    slider(kIdBorderWidth, x3, y, col);
+    {
+        const int labelW = S(96);
+        place(kIdBorderColorLabel, x3, y + S(4), labelW, S(20));
+        place(kIdBorderColor, x3 + labelW, y, S(64), S(26));
+        y += S(34);
+    }
+    slider(kIdBorderOpacity, x3, y, col);
+    place(kIdAppearanceNote, x3, y, col, S(34));
+    y += S(38);
+    bottom = std::max(bottom, y);
+
+    // Full width: status, hint, buttons.
+    y = bottom + S(8);
     const int fullW = width - 2 * pad;
     place(kIdSecStatus, pad, y, fullW, S(20));
     y += S(24);
-    place(kIdStatus, pad, y, fullW, S(54));
-    y += S(60);
-    place(kIdHint, pad, y, fullW, S(36));
-    y += S(46);
+    place(kIdStatus, pad, y, fullW, S(72));
+    y += S(78);
+    place(kIdHint, pad, y, fullW, S(20));
+    y += S(30);
 
-    const int bh = S(30), bw = S(96), gap = S(8);
-    place(kIdDefaults, pad, y, bw, bh);
-    place(kIdFolder, pad + bw + gap, y, S(116), bh);
-    place(kIdClose, width - pad - bw, y, bw, bh);
-    place(kIdExit, width - pad - bw - gap - S(110), y, S(110), bh);
+    const int bh = S(30), gap = S(8);
+    int bx = pad;
+    for (auto [id, w] : {std::pair{kIdDefaults, S(96)}, {kIdFolder, S(116)}, {kIdDebugReport, S(140)}}) {
+        place(id, bx, y, w, bh);
+        bx += w + gap;
+    }
+    place(kIdClose, width - pad - S(96), y, S(96), bh);
+    place(kIdExit, width - pad - S(96) - gap - S(116), y, S(116), bh);
     y += bh + S(18);
     return {width, y};
 }
@@ -210,8 +292,21 @@ void AddCombo(int id, std::initializer_list<const wchar_t*> items) {
     for (const wchar_t* item : items) ComboBox_AddString(combo, item);
 }
 
+void AddSlider(int id) {
+    for (const Slider& s : kSliders) {
+        if (s.id != id) continue;
+        AddControl(WC_STATICW, s.text, SS_LEFT, s.labelId);
+        HWND tb = AddControl(TRACKBAR_CLASSW, L"", TBS_HORZ | TBS_NOTICKS | WS_TABSTOP, s.id);
+        SendMessageW(tb, TBM_SETRANGEMIN, FALSE, s.min);
+        SendMessageW(tb, TBM_SETRANGEMAX, TRUE, s.max);
+        SendMessageW(tb, TBM_SETPAGESIZE, 0, s.max - s.min > 20 ? 5 : 1);
+    }
+}
+
+// Controls are created in visual (tab) order.
 void CreateControls() {
     const DWORD check = BS_AUTOCHECKBOX | WS_TABSTOP;
+    const DWORD swatch = BS_OWNERDRAW | WS_TABSTOP;
     AddControl(WC_STATICW, L"IslandBar", SS_LEFT, kIdHeader);
     AddControl(WC_BUTTONW, L"Enabled", check, kIdEnabled);
 
@@ -227,15 +322,25 @@ void CreateControls() {
     AddControl(WC_BUTTONW, L"Extend taskbar during Alt+Tab / Task View", check, kIdFillTaskSwitch);
     AddControl(WC_BUTTONW, L"Auto-hide (reveal on mouse over)", check, kIdAutoHide);
     AddControl(WC_BUTTONW, L"Start with Windows", check, kIdAutostart);
+    AddControl(WC_BUTTONW, L"Verbose debug logging", check, kIdDebugLogging);
 
     AddControl(WC_STATICW, L"Shape", SS_LEFT, kIdSecShape);
-    for (const Slider& s : kSliders) {
-        AddControl(WC_STATICW, s.text, SS_LEFT, s.labelId);
-        HWND tb = AddControl(TRACKBAR_CLASSW, L"", TBS_HORZ | TBS_NOTICKS | WS_TABSTOP, s.id);
-        SendMessageW(tb, TBM_SETRANGEMIN, FALSE, s.min);
-        SendMessageW(tb, TBM_SETRANGEMAX, TRUE, s.max);
-        SendMessageW(tb, TBM_SETPAGESIZE, 0, 2);
-    }
+    for (int id : {kIdRadius, kIdTop, kIdBottom, kIdPadding}) AddSlider(id);
+
+    AddControl(WC_STATICW, L"Appearance", SS_LEFT, kIdSecAppearance);
+    AddControl(WC_STATICW, L"Background", SS_LEFT, kIdBackgroundLabel);
+    AddCombo(kIdBackground, {L"Windows default", L"Solid colour", L"Gradient"});
+    AddControl(WC_STATICW, L"Colours", SS_LEFT, kIdColorsLabel);
+    AddControl(WC_BUTTONW, L"Colour 1", swatch, kIdColor1);
+    AddControl(WC_BUTTONW, L"Colour 2", swatch, kIdColor2);
+    AddControl(WC_STATICW, L"Direction", SS_LEFT, kIdDirectionLabel);
+    AddCombo(kIdDirection, {L"Left → right", L"Top → bottom", L"Diagonal ↘", L"Diagonal ↗"});
+    AddSlider(kIdOpacity);
+    AddSlider(kIdBorderWidth);
+    AddControl(WC_STATICW, L"Border colour", SS_LEFT, kIdBorderColorLabel);
+    AddControl(WC_BUTTONW, L"Border colour", swatch, kIdBorderColor);
+    AddSlider(kIdBorderOpacity);
+    AddControl(WC_STATICW, L"Custom backgrounds need TranslucentTB with the taskbar set to Clear.", SS_LEFT, kIdAppearanceNote);
 
     AddControl(WC_STATICW, L"Status", SS_LEFT, kIdSecStatus);
     AddControl(WC_STATICW, L"", SS_LEFT | SS_NOPREFIX, kIdStatus);
@@ -245,26 +350,31 @@ void CreateControls() {
                SS_LEFT, kIdHint);
     AddControl(WC_BUTTONW, L"Defaults", BS_PUSHBUTTON | WS_TABSTOP, kIdDefaults);
     AddControl(WC_BUTTONW, L"Config folder", BS_PUSHBUTTON | WS_TABSTOP, kIdFolder);
+    AddControl(WC_BUTTONW, L"Debug report…", BS_PUSHBUTTON | WS_TABSTOP, kIdDebugReport);
     AddControl(WC_BUTTONW, L"Exit IslandBar", BS_PUSHBUTTON | WS_TABSTOP, kIdExit);
     AddControl(WC_BUTTONW, L"Close", BS_DEFPUSHBUTTON | WS_TABSTOP, kIdClose);
 }
 
 void UpdateEnabledStates(const Config& c) {
-    for (int id : kDependsOnEnabled) EnableWindow(Item(id), c.enabled);
-    const bool islands = c.enabled && c.mode == LayoutMode::Islands;
-    EnableWindow(Item(kIdTray), islands);
-    EnableWindow(Item(kIdWidgets), islands);
+    const bool on = c.enabled;
+    const bool islands = on && c.mode == LayoutMode::Islands;
+    const bool custom = on && c.background != Background::Default;
+    const bool gradient = custom && c.background == Background::Gradient;
+    const bool border = custom && c.borderWidth > 0;
+    for (int id : {kIdMode, kIdFillMaximise, kIdFillTaskSwitch, kIdAutoHide, kIdRadius, kIdTop, kIdBottom, kIdPadding, kIdBackground})
+        EnableWindow(Item(id), on);
+    for (int id : {kIdTray, kIdWidgets}) EnableWindow(Item(id), islands);
+    for (int id : {kIdColor1, kIdOpacity, kIdBorderWidth}) EnableWindow(Item(id), custom);
+    for (int id : {kIdColor2, kIdDirection}) EnableWindow(Item(id), gradient);
+    for (int id : {kIdBorderColor, kIdBorderOpacity}) EnableWindow(Item(id), border);
 }
 
-void ApplyFromControls() {
-    Config c = g_host.getConfig();
+void ApplyFromControls(Config c) {
     for (const Check& ch : kChecks) c.*ch.field = Button_GetCheck(Item(ch.id)) == BST_CHECKED;
     c.mode = ComboBox_GetCurSel(Item(kIdMode)) == 1 ? LayoutMode::Bar : LayoutMode::Islands;
-    switch (ComboBox_GetCurSel(Item(kIdTray))) {
-        case 1: c.trayMode = TrayMode::Hover; break;
-        case 2: c.trayMode = TrayMode::Hide; break;
-        default: c.trayMode = TrayMode::Show; break;
-    }
+    c.trayMode = static_cast<TrayMode>(std::max(0, ComboBox_GetCurSel(Item(kIdTray))));
+    c.background = static_cast<Background>(std::max(0, ComboBox_GetCurSel(Item(kIdBackground))));
+    c.gradientDirection = static_cast<GradientDirection>(std::max(0, ComboBox_GetCurSel(Item(kIdDirection))));
     for (const Slider& s : kSliders) {
         c.*s.field = static_cast<int>(SendMessageW(Item(s.id), TBM_GETPOS, 0, 0));
         SetSliderLabel(s, c.*s.field);
@@ -274,11 +384,69 @@ void ApplyFromControls() {
     RefreshStatus();
 }
 
+void ApplyFromControls() { ApplyFromControls(g_host.getConfig()); }
+
+void PickColor(const Swatch& sw) {
+    Config c = g_host.getConfig();
+    CHOOSECOLORW cc = {sizeof(cc)};
+    cc.hwndOwner = g_wnd;
+    cc.rgbResult = c.*sw.field;
+    cc.lpCustColors = g_customColors;
+    cc.Flags = CC_FULLOPEN | CC_RGBINIT;
+    if (!ChooseColorW(&cc)) return;
+    c.*sw.field = cc.rgbResult;
+    InvalidateRect(Item(sw.id), nullptr, TRUE);
+    ApplyFromControls(c);
+}
+
+void DrawSwatch(const DRAWITEMSTRUCT& di) {
+    const Config c = g_host.getConfig();
+    COLORREF color = RGB(128, 128, 128);
+    for (const Swatch& sw : kSwatches) {
+        if (static_cast<int>(di.CtlID) == sw.id) color = c.*sw.field;
+    }
+    const bool disabled = (di.itemState & ODS_DISABLED) != 0;
+    RECT r = di.rcItem;
+    FillRect(di.hDC, &r, GetSysColorBrush(COLOR_WINDOW));
+    HBRUSH frame = GetSysColorBrush(disabled ? COLOR_GRAYTEXT : COLOR_WINDOWTEXT);
+    InflateRect(&r, -1, -1);
+    FrameRect(di.hDC, &r, frame);
+    InflateRect(&r, -2, -2);
+    if (disabled) {
+        FillRect(di.hDC, &r, GetSysColorBrush(COLOR_BTNFACE));
+    } else {
+        HBRUSH fill = CreateSolidBrush(color);
+        FillRect(di.hDC, &r, fill);
+        DeleteObject(fill);
+    }
+    if (di.itemState & ODS_FOCUS) {
+        RECT f = di.rcItem;
+        DrawFocusRect(di.hDC, &f);
+    }
+}
+
+// Verbose logging records more detail (window classes and process names of the
+// foreground window). Ask before turning it on.
+bool ConfirmDebugLogging() {
+    return MessageBoxW(g_wnd,
+                       L"Verbose debug logging writes extra detail to log.txt in the IslandBar config folder:\n\n"
+                       L"• every taskbar update and the button rectangles read\n"
+                       L"• the window class and process name of the foreground window\n"
+                       L"• which monitors have a maximised window\n\n"
+                       L"Nothing is sent anywhere. The log stays on this PC until you delete it or choose to share it. "
+                       L"You can turn this off at any time.\n\nEnable verbose debug logging?",
+                       L"IslandBar – debug logging", MB_YESNO | MB_ICONQUESTION | MB_DEFBUTTON2) == IDYES;
+}
+
 LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     switch (msg) {
         case WM_HSCROLL:
             if (lParam) ApplyFromControls();
             return 0;
+
+        case WM_DRAWITEM:
+            DrawSwatch(*reinterpret_cast<const DRAWITEMSTRUCT*>(lParam));
+            return TRUE;
 
         case WM_COMMAND: {
             const int id = LOWORD(wParam);
@@ -286,20 +454,35 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             switch (id) {
                 case kIdMode:
                 case kIdTray:
+                case kIdBackground:
+                case kIdDirection:
                     if (code == CBN_SELCHANGE) ApplyFromControls();
                     return 0;
                 case kIdAutostart:
                     if (code == BN_CLICKED) g_host.setAutostart(Button_GetCheck(Item(kIdAutostart)) == BST_CHECKED);
                     return 0;
+                case kIdDebugLogging:
+                    if (code == BN_CLICKED) {
+                        Config c = g_host.getConfig();
+                        const bool want = Button_GetCheck(Item(kIdDebugLogging)) == BST_CHECKED;
+                        c.debugLogging = want && ConfirmDebugLogging();
+                        Button_SetCheck(Item(kIdDebugLogging), c.debugLogging ? BST_CHECKED : BST_UNCHECKED);
+                        g_host.setConfig(c);
+                    }
+                    return 0;
                 case kIdDefaults: {
                     Config defaults;
                     defaults.pollIntervalMs = g_host.getConfig().pollIntervalMs;
+                    defaults.debugLogging = g_host.getConfig().debugLogging;
                     g_host.setConfig(defaults);
                     RefreshControls();
                     return 0;
                 }
                 case kIdFolder:
                     g_host.openConfigFolder();
+                    return 0;
+                case kIdDebugReport:
+                    g_host.createDebugReport();
                     return 0;
                 case kIdExit:
                     g_host.exitApp();
@@ -308,6 +491,9 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 case IDCANCEL:
                     DestroyWindow(hwnd);
                     return 0;
+            }
+            for (const Swatch& sw : kSwatches) {
+                if (id == sw.id && code == BN_CLICKED) PickColor(sw);
             }
             for (const Check& ch : kChecks) {
                 if (id == ch.id && code == BN_CLICKED) ApplyFromControls();
@@ -320,7 +506,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             HDC dc = reinterpret_cast<HDC>(wParam);
             const int id = GetDlgCtrlID(reinterpret_cast<HWND>(lParam));
             SetBkColor(dc, GetSysColor(COLOR_WINDOW));
-            SetTextColor(dc, GetSysColor(id == kIdStatus || id == kIdHint ? COLOR_GRAYTEXT : COLOR_WINDOWTEXT));
+            SetTextColor(dc, GetSysColor(IsGrayText(id) ? COLOR_GRAYTEXT : COLOR_WINDOWTEXT));
             return reinterpret_cast<LRESULT>(GetSysColorBrush(COLOR_WINDOW));
         }
 
@@ -331,10 +517,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
 
         case WM_DESTROY:
             g_wnd = nullptr;
-            for (HFONT* f : {&g_font, &g_sectionFont, &g_headerFont}) {
-                if (*f) DeleteObject(*f);
-                *f = nullptr;
-            }
+            DeleteFonts();
             return 0;
     }
     return DefWindowProcW(hwnd, msg, wParam, lParam);
@@ -382,12 +565,16 @@ void RefreshControls() {
     const Config c = g_host.getConfig();
     for (const Check& ch : kChecks) Button_SetCheck(Item(ch.id), c.*ch.field ? BST_CHECKED : BST_UNCHECKED);
     Button_SetCheck(Item(kIdAutostart), g_host.getAutostart() ? BST_CHECKED : BST_UNCHECKED);
+    Button_SetCheck(Item(kIdDebugLogging), c.debugLogging ? BST_CHECKED : BST_UNCHECKED);
     ComboBox_SetCurSel(Item(kIdMode), c.mode == LayoutMode::Bar ? 1 : 0);
-    ComboBox_SetCurSel(Item(kIdTray), c.trayMode == TrayMode::Hover ? 1 : c.trayMode == TrayMode::Hide ? 2 : 0);
+    ComboBox_SetCurSel(Item(kIdTray), static_cast<int>(c.trayMode));
+    ComboBox_SetCurSel(Item(kIdBackground), static_cast<int>(c.background));
+    ComboBox_SetCurSel(Item(kIdDirection), static_cast<int>(c.gradientDirection));
     for (const Slider& s : kSliders) {
         SendMessageW(Item(s.id), TBM_SETPOS, TRUE, c.*s.field);
         SetSliderLabel(s, c.*s.field);
     }
+    for (const Swatch& sw : kSwatches) InvalidateRect(Item(sw.id), nullptr, TRUE);
     UpdateEnabledStates(c);
     RefreshStatus();
 }
@@ -395,7 +582,7 @@ void RefreshControls() {
 void RefreshStatus() {
     if (!g_wnd) return;
     const std::wstring status = g_host.getStatus();
-    wchar_t current[1024] = {};
+    wchar_t current[2048] = {};
     GetWindowTextW(Item(kIdStatus), current, static_cast<int>(std::size(current)));
     if (status != current) SetWindowTextW(Item(kIdStatus), status.c_str());
 }

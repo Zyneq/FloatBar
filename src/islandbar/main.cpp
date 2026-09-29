@@ -12,10 +12,12 @@
 #include <string>
 
 #include "common/uia_util.h"
+#include "common/version.h"
 #include "core/config.h"
 #include "core/log.h"
 #include "core/region.h"
 #include "islandbar/app_icon.h"
+#include "islandbar/debug_report.h"
 #include "islandbar/engine.h"
 #include "islandbar/settings_window.h"
 
@@ -47,6 +49,7 @@ enum MenuId : UINT {
     kMenuAutoHide,
     kMenuReload,
     kMenuOpenFolder,
+    kMenuDebugReport,
     kMenuAutostart,
     kMenuExit,
 };
@@ -107,7 +110,9 @@ void RunUpdate(bool force, bool readBounds = true) {
 
 void SetConfig(const ib::Config& config, bool save) {
     const bool wasEnabled = g_config.enabled;
+    if (config.debugLogging != g_config.debugLogging) ib::log::Write(L"verbose debug logging %s", config.debugLogging ? L"on" : L"off");
     g_config = config;
+    ib::log::SetVerbose(g_config.debugLogging);
     g_engine->SetConfig(g_config);
     if (wasEnabled && !g_config.enabled) g_engine->ClearAll();
     SetTimer(g_mainWnd, kTimerPoll, g_config.pollIntervalMs, nullptr);
@@ -139,6 +144,8 @@ void OpenConfigFolder() {
     ShellExecuteW(nullptr, L"open", ib::ConfigDir().c_str(), nullptr, nullptr, SW_SHOWNORMAL);
 }
 
+void CreateDebugReport() { ib::CreateDebugReport(ib::settings::Window(), g_engine->Status()); }
+
 // ---------------------------------------------------------------- UI
 
 void ShowSettings() {
@@ -148,6 +155,7 @@ void ShowSettings() {
     host.getAutostart = IsAutostartEnabled;
     host.setAutostart = SetAutostart;
     host.openConfigFolder = OpenConfigFolder;
+    host.createDebugReport = CreateDebugReport;
     host.getStatus = [] { return g_engine->Status(); };
     host.exitApp = [] { DestroyWindow(g_mainWnd); };
     ib::settings::Show(g_instance, host, g_smallIcon, g_largeIcon);
@@ -187,6 +195,7 @@ void ShowTrayMenu(int x, int y) {
     AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(menu, MF_STRING, kMenuReload, L"Reload config");
     AppendMenuW(menu, MF_STRING, kMenuOpenFolder, L"Open config folder");
+    AppendMenuW(menu, MF_STRING, kMenuDebugReport, L"Create debug report…");
     AppendMenuW(menu, MF_STRING | check(IsAutostartEnabled()), kMenuAutostart, L"Start with Windows");
     AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(menu, MF_STRING, kMenuExit, L"Exit");
@@ -207,6 +216,7 @@ void OnMenu(UINT id) {
         case kMenuAutoHide: c.autoHide = !c.autoHide; break;
         case kMenuReload: ReloadConfig(); return;
         case kMenuOpenFolder: OpenConfigFolder(); return;
+        case kMenuDebugReport: CreateDebugReport(); return;
         case kMenuAutostart: SetAutostart(!IsAutostartEnabled()); ib::settings::RefreshControls(); return;
         case kMenuExit: DestroyWindow(g_mainWnd); return;
         default: return;
@@ -355,7 +365,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
 
     const std::wstring dir = ib::ConfigDir();
     ib::log::Init(dir);
-    ib::log::Write(L"---- IslandBar starting (%s)", ExePath().c_str());
+    ib::log::Write(L"---- IslandBar %s starting (%s)", ib::kVersion, ExePath().c_str());
 
     SetUnhandledExceptionFilter(CrashFilter);
 

@@ -1,0 +1,92 @@
+name: Build and release
+
+# Every push to main builds and uploads the binaries as a workflow artifact.
+# Pushing a tag like v1.2.0 additionally publishes a GitHub release with
+# SHA-256 checksums and signed build-provenance attestations, so anyone can
+# verify that a download was built from this repository by this workflow.
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: windows-latest
+    permissions:
+      contents: write       # create the release
+      id-token: write       # sign the attestation (Sigstore)
+      attestations: write   # store the attestation
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Determine version
+        id: version
+        shell: pwsh
+        run: |
+          if ($env:GITHUB_REF_TYPE -eq 'tag') {
+            $v = $env:GITHUB_REF_NAME.TrimStart('v')
+          } else {
+            $v = "0.0.0-dev.$env:GITHUB_RUN_NUMBER+$($env:GITHUB_SHA.Substring(0, 7))"
+          }
+          "version=$v" >> $env:GITHUB_OUTPUT
+
+      - name: Configure
+        run: cmake -B build -G "Visual Studio 17 2022" -A x64 "-DIB_VERSION=${{ steps.version.outputs.version }}"
+
+      - name: Build
+        run: cmake --build build --config Release
+
+      - name: Package and hash
+        shell: pwsh
+        run: |
+          $v = '${{ steps.version.outputs.version }}' -replace '\+', '-'
+          New-Item -ItemType Directory -Force dist, stage | Out-Null
+          Copy-Item build/Release/islandbar.exe, build/Release/uia-dump.exe dist/
+          Copy-Item dist/*, README.md, LICENSE stage/
+          Compress-Archive -Path stage/* -DestinationPath "dist/IslandBar-$v-win-x64.zip"
+          Push-Location dist
+          Get-ChildItem -File | Sort-Object Name | ForEach-Object {
+            "{0}  {1}" -f (Get-FileHash $_.Name -Algorithm SHA256).Hash.ToLower(), $_.Name
+          } | Out-File -Encoding ascii SHA256SUMS.txt
+          Get-Content SHA256SUMS.txt
+          Pop-Location
+
+      - name: Attest build provenance
+        if: github.event_name != 'pull_request'
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: |
+            dist/islandbar.exe
+            dist/uia-dump.exe
+            dist/*.zip
+
+      - name: Upload workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: IslandBar-${{ github.run_number }}
+          path: dist/
+
+      - name: Publish release
+        if: github.ref_type == 'tag'
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          generate_release_notes: true
+          body: |
+            ### Verify your download
+
+            **Checksum:** compare with `SHA256SUMS.txt` from this release.
+            ```powershell
+            Get-FileHash .\islandbar.exe -Algorithm SHA256
+            ```
+
+            **Build provenance:** proves the file was built from this repository by GitHub Actions
+            (needs the GitHub CLI, https://cli.github.com).
+            ```powershell
+            gh attestation verify .\islandbar.exe --repo ${{ github.repository }}
+            ```

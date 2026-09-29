@@ -16,6 +16,7 @@ struct Host {
     std::function<bool()> getAutostart;
     std::function<void(bool)> setAutostart;
     std::function<void()> openConfigFolder;
+    std::function<void()> createDebugReport;       // asks for consent itself
     std::function<std::wstring()> getStatus;
     std::function<void()> exitApp;
 };

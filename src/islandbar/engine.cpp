@@ -1,6 +1,7 @@
 #include "islandbar/engine.h"
 
 #include <dwmapi.h>
+#include <tlhelp32.h>
 
 #include <algorithm>
 
@@ -57,6 +58,18 @@ BOOL CALLBACK CollectMaximised(HWND hwnd, LPARAM lParam) {
 
 RECT Padded(const RECT& r, int padding) { return {r.left - padding, r.top, r.right + padding, r.bottom}; }
 
+bool IsProcessRunning(const wchar_t* exeName) {
+    HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+    if (snapshot == INVALID_HANDLE_VALUE) return false;
+    PROCESSENTRY32W entry = {sizeof(entry)};
+    bool found = false;
+    for (BOOL ok = Process32FirstW(snapshot, &entry); ok && !found; ok = Process32NextW(snapshot, &entry)) {
+        found = _wcsicmp(entry.szExeFile, exeName) == 0;
+    }
+    CloseHandle(snapshot);
+    return found;
+}
+
 }  // namespace
 
 Engine* Engine::s_instance = nullptr;
@@ -89,7 +102,7 @@ void Engine::Attach() {
         Taskbar tb;
         tb.hwnd = hwnd;
         tb.primary = WindowClass(hwnd) == L"Shell_TrayWnd";
-        taskbars_.push_back(tb);
+        taskbars_.push_back(std::move(tb));
     }
 
     explorerPid_ = 0;
@@ -111,7 +124,9 @@ void Engine::Detach() {
 }
 
 bool Engine::NeedsGlobalHooks() const {
+    // A custom background also needs foreground changes to keep its z-order under fullscreen apps.
     return config_.enabled && (config_.fillOnMaximise || config_.fillOnTaskSwitch || config_.autoHide ||
+                               config_.background != Background::Default ||
                                (config_.mode == LayoutMode::Islands && config_.trayMode == TrayMode::Hover));
 }
 
@@ -216,6 +231,7 @@ Engine::Context Engine::BuildContext() const {
     if (HWND fg = GetForegroundWindow()) {
         HWND root = GetAncestor(fg, GA_ROOT);
         const std::wstring cls = WindowClass(root);
+        ctx.foregroundClass = cls;
         DWORD pid = 0;
         GetWindowThreadProcessId(root, &pid);
         ctx.taskSwitch = switching_ || rules::InList(cls, rules::kTaskSwitcherClasses);
@@ -230,6 +246,8 @@ Engine::Context Engine::BuildContext() const {
 bool Engine::Update(bool force, bool readBounds) {
     if (!config_.enabled) return false;
     const Context ctx = BuildContext();
+    log::Debug(L"update force=%d bounds=%d fg=%s shellUi=%d taskSwitch=%d maximisedMonitors=%zu", force, readBounds,
+               ctx.foregroundClass.c_str(), ctx.shellUi, ctx.taskSwitch, ctx.maximised.size());
     bool retry = false;
     for (Taskbar& tb : taskbars_) retry |= UpdateOne(tb, force, readBounds, ctx);
     return retry;
@@ -243,7 +261,12 @@ bool Engine::UpdateOne(Taskbar& tb, bool force, bool readBounds, const Context& 
     }
 
     if (readBounds || !tb.islands) {
+        const DWORD start = GetTickCount();
         const BoundsResult result = reader_.Compute(tb.hwnd);
+        log::Debug(L"%s: bounds read in %lu ms: %s", label.c_str(), GetTickCount() - start,
+                   result.islands ? (L"app " + FormatRect(result.islands->app) + L", " + std::to_wstring(result.islands->extras.size()) +
+                                     L" extra, tray " + (result.islands->hasTray ? FormatRect(result.islands->tray) : L"-")).c_str()
+                                  : result.error.c_str());
         if (!result.islands) {
             ++tb.failures;
             if (tb.lastError != result.error) {
@@ -257,6 +280,9 @@ bool Engine::UpdateOne(Taskbar& tb, bool force, bool readBounds, const Context& 
                 if (tb.applied) log::Write(L"%s: falling back to unclipped taskbar", label.c_str());
                 tb.applied.reset();
             }
+            RECT wr = {};
+            GetWindowRect(tb.hwnd, &wr);
+            SyncBackdrop(tb, kFilled, wr, {}, {}, GetDpiForWindow(tb.hwnd));
             tb.status = L"unclipped – " + result.error;
             return false;
         }
@@ -323,6 +349,8 @@ bool Engine::UpdateOne(Taskbar& tb, bool force, bool readBounds, const Context& 
             }
     }
 
+    SyncBackdrop(tb, state, wr, spans, style, dpi);
+
     const bool regionLost = state != kFilled && tb.applied && !HasRegion(tb.hwnd);
     if (!force && tb.applied == key && !regionLost) return false;
 
@@ -349,10 +377,32 @@ bool Engine::UpdateOne(Taskbar& tb, bool force, bool readBounds, const Context& 
     return false;
 }
 
+void Engine::SyncBackdrop(Taskbar& tb, LONG state, const RECT& wr, const std::vector<RECT>& spans, const SpanStyle& style, UINT dpi) {
+    if (config_.background == Background::Default) {
+        tb.backdrop.reset();
+        return;
+    }
+    if (!tb.backdrop) tb.backdrop = std::make_unique<Backdrop>();
+    if (state == kHidden) {
+        tb.backdrop->Hide();
+        return;
+    }
+    std::vector<RECT> shapes;
+    int radius = style.radius;
+    if (state == kFilled) {
+        shapes.push_back({0, 0, wr.right - wr.left, wr.bottom - wr.top});
+        radius = 0;
+    } else {
+        for (const RECT& span : spans) shapes.push_back(SpanToWindowRect(wr, span, style));
+    }
+    tb.backdrop->Show(tb.hwnd, wr, shapes, radius, config_, dpi ? dpi : 96);
+}
+
 void Engine::ClearAll() {
     for (Taskbar& tb : taskbars_) {
         if (IsWindow(tb.hwnd)) ClearRegion(tb.hwnd);
         tb.applied.reset();
+        tb.backdrop.reset();
     }
     ClearAllTaskbars();
 }
@@ -366,6 +416,9 @@ std::wstring Engine::Status() const {
         if (!s.empty()) s += L"\r\n";
         s += tb.primary ? std::wstring(L"Main taskbar: ") : L"Monitor " + std::to_wstring(++secondary + 1) + L": ";
         s += tb.status.empty() ? L"pending" : tb.status;
+    }
+    if (config_.background != Background::Default && !IsProcessRunning(L"TranslucentTB.exe")) {
+        s += L"\r\n⚠ TranslucentTB is not running: the custom background stays hidden behind the Windows one.";
     }
     return s;
 }

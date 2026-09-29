@@ -13,6 +13,10 @@ struct SpanStyle {
     int radius = 0;
 };
 
+// The window-relative rectangle a span occupies (may extend past the window
+// vertically when a margin is negative). Shared by the clip and the backdrop.
+RECT SpanToWindowRect(const RECT& windowRect, const RECT& span, const SpanStyle& style);
+
 // Primary taskbar (Shell_TrayWnd) first, then every Shell_SecondaryTrayWnd.
 std::vector<HWND> FindTaskbars();
 

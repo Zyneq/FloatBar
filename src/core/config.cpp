@@ -19,6 +19,35 @@ void Clamp(Config& c) {
     c.marginBottom = std::clamp(c.marginBottom, kMinMargin, kMaxMargin);
     c.islandPadding = std::clamp(c.islandPadding, 0, kMaxIslandPadding);
     c.pollIntervalMs = std::clamp(c.pollIntervalMs, 250, 10000);
+    c.opacity = std::clamp(c.opacity, 0, 100);
+    c.borderWidth = std::clamp(c.borderWidth, 0, kMaxBorderWidth);
+    c.borderOpacity = std::clamp(c.borderOpacity, 0, 100);
+}
+
+// Colours are stored as "#RRGGBB".
+std::string ToHex(unsigned long colorref) {
+    char buf[8];
+    snprintf(buf, sizeof(buf), "#%02X%02X%02X", GetRValue(colorref), GetGValue(colorref), GetBValue(colorref));
+    return buf;
+}
+
+unsigned long ParseHex(const std::string& s, unsigned long fallback) {
+    if (s.size() != 7 || s[0] != '#') return fallback;
+    char* end = nullptr;
+    const unsigned long rgb = strtoul(s.c_str() + 1, &end, 16);
+    if (*end) return fallback;
+    return RGB((rgb >> 16) & 0xFF, (rgb >> 8) & 0xFF, rgb & 0xFF);
+}
+
+constexpr const char* kBackgroundNames[] = {"default", "solid", "gradient"};
+constexpr const char* kDirectionNames[] = {"horizontal", "vertical", "diagonalDown", "diagonalUp"};
+
+template <typename Enum, size_t N>
+Enum ParseEnum(const std::string& s, const char* const (&names)[N], Enum fallback) {
+    for (size_t i = 0; i < N; ++i) {
+        if (s == names[i]) return static_cast<Enum>(i);
+    }
+    return fallback;
 }
 
 const char* ToString(LayoutMode m) { return m == LayoutMode::Bar ? "bar" : "islands"; }
@@ -82,6 +111,15 @@ bool LoadConfig(Config& out, std::wstring& error) {
         c.fillOnTaskSwitch = j.value("fillOnTaskSwitch", c.fillOnTaskSwitch);
         c.autoHide = j.value("autoHide", c.autoHide);
         c.pollIntervalMs = j.value("pollIntervalMs", c.pollIntervalMs);
+        c.background = ParseEnum(j.value("background", std::string()), kBackgroundNames, c.background);
+        c.color1 = ParseHex(j.value("color1", std::string()), c.color1);
+        c.color2 = ParseHex(j.value("color2", std::string()), c.color2);
+        c.gradientDirection = ParseEnum(j.value("gradientDirection", std::string()), kDirectionNames, c.gradientDirection);
+        c.opacity = j.value("opacity", c.opacity);
+        c.borderWidth = j.value("borderWidth", c.borderWidth);
+        c.borderColor = ParseHex(j.value("borderColor", std::string()), c.borderColor);
+        c.borderOpacity = j.value("borderOpacity", c.borderOpacity);
+        c.debugLogging = j.value("debugLogging", c.debugLogging);
         Clamp(c);
         out = c;
         return true;
@@ -105,6 +143,15 @@ bool SaveConfig(const Config& c) {
         {"fillOnTaskSwitch", c.fillOnTaskSwitch},
         {"autoHide", c.autoHide},
         {"pollIntervalMs", c.pollIntervalMs},
+        {"background", kBackgroundNames[static_cast<int>(c.background)]},
+        {"color1", ToHex(c.color1)},
+        {"color2", ToHex(c.color2)},
+        {"gradientDirection", kDirectionNames[static_cast<int>(c.gradientDirection)]},
+        {"opacity", c.opacity},
+        {"borderWidth", c.borderWidth},
+        {"borderColor", ToHex(c.borderColor)},
+        {"borderOpacity", c.borderOpacity},
+        {"debugLogging", c.debugLogging},
     };
     std::ofstream file(ConfigPath(), std::ios::binary | std::ios::trunc);
     file << j.dump(2) << "\n";
