@@ -199,8 +199,8 @@ LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
                     g_engine->Update(false, true);
                     break;
                 case kTimerRefresh:
-                    g_engine->RefreshRegions();
-                    if (!g_engine->NeedsRegionRefresh()) {
+                    g_engine->Refresh();
+                    if (!g_engine->NeedsRefresh()) {
                         KillTimer(hwnd, kTimerRefresh);
                         g_refreshTimer = false;
                     }
@@ -295,14 +295,28 @@ void Dispatch(MSG& msg) {
     DispatchMessageW(&msg);
 }
 
+// Waits for the next composition frame. The compositor clock (Windows 11) ticks
+// at the fastest display's rate. DwmFlush also waits for slower displays whose
+// taskbar changed: with 360, 165 and 60 Hz monitors it skipped one frame in ten
+// while every taskbar animated, the clock one in a hundred.
+void WaitForFrame() {
+    using WaitForClock = DWORD(WINAPI*)(UINT, const HANDLE*, DWORD);
+    static const auto waitForClock = [] {
+        HMODULE dcomp = LoadLibraryExW(L"dcomp.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32);
+        return dcomp ? reinterpret_cast<WaitForClock>(GetProcAddress(dcomp, "DCompositionWaitForCompositorClock")) : nullptr;
+    }();
+    if (waitForClock && waitForClock(0, nullptr, 50) != WAIT_FAILED) return;
+    if (FAILED(DwmFlush())) Sleep(1);
+}
+
 // Idle: block in GetMessage. While islands move: drain messages, draw the frame
-// for "now", then wait for the next display refresh (DwmFlush), so motion is
-// updated exactly once per refresh at any refresh rate.
+// for "now", then wait for the next composition frame, so motion is updated
+// exactly once per refresh at any refresh rate.
 void RunMessageLoop() {
     MSG msg;
     for (;;) {
-        if (!g_refreshTimer && g_engine->NeedsRegionRefresh()) {
-            SetTimer(g_mainWnd, kTimerRefresh, fb::Engine::kRegionRefreshMs, nullptr);
+        if (!g_refreshTimer && g_engine->NeedsRefresh()) {
+            SetTimer(g_mainWnd, kTimerRefresh, fb::Engine::kRefreshMs, nullptr);
             g_refreshTimer = true;
         }
         if (!g_engine->Animating()) {
@@ -315,7 +329,7 @@ void RunMessageLoop() {
             Dispatch(msg);
         }
         g_engine->Animate();
-        if (FAILED(DwmFlush())) Sleep(1);
+        WaitForFrame();
     }
 }
 

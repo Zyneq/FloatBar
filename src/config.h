@@ -47,7 +47,6 @@ struct Config {
     bool autoHide = false;
     bool animate = true;             // move island edges smoothly instead of jumping
     int animationSpeed = 100;        // percent: 200 = twice as fast, 50 = half speed
-    bool separateStart = false;      // Start (+ Search, Task View) as its own island left of the apps
     bool hideOverFullscreen = true;  // hide while a fullscreen/borderless app covers the monitor
     bool hideShowDesktop = false;    // clip the Show Desktop sliver in full-width and bar modes too
     std::map<std::wstring, MonitorMode> monitorModes;  // key: monitor device name, e.g. \\.\DISPLAY2

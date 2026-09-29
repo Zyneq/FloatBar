@@ -206,19 +206,6 @@ bool BoundsReader::Read(Handles& h, const RECT& wr, UINT dpi, BoundsResult& resu
     islands.app = main->rect;
     islands.appCount = main->count;
 
-    // Where the system buttons end and the app buttons begin, inside the Start cluster.
-    const Button* previous = nullptr;
-    for (const Button& b : buttons) {
-        RECT overlap;
-        if (!IntersectRect(&overlap, &b.rect, &main->rect)) continue;
-        if (b.app && previous && !previous->app) {
-            islands.hasSplit = true;
-            islands.split = b.rect.left;
-            break;
-        }
-        previous = &b;
-    }
-
     // --- Tray ---
     ComPtr<IUIAutomationElementArray> trayButtons;
     if (FAILED(h.trayParent->FindAllBuildCache(h.trayScope, trayButtonCond_.Get(), cache_.Get(), &trayButtons))) return false;

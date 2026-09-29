@@ -21,11 +21,13 @@
 
 #include "common.h"
 
+#include <dwmapi.h>
 #include <winternl.h>
 
 #include <algorithm>
 #include <atomic>
 #include <climits>
+#include <cmath>
 #include <cstdarg>
 #include <cstdio>
 #include <mutex>
@@ -50,7 +52,6 @@ constexpr int kRingTolerance = 150;      // distance from the test border colour
 constexpr int kEdgeProbe = 2;            // an icon within this many columns of an island edge is cut
 constexpr int kFlashColumns = 80;        // a one-frame bulge of this many visible columns is a flash
 constexpr BYTE kTestBorderBgra[4] = {255, 0, 255, 255};
-constexpr int kStartGapLogicalPx = 8;    // as in engine.cpp
 
 using fb::Utf8;
 
@@ -87,6 +88,8 @@ struct Frame {
     int cutAt = -1;                 // screen x of an island edge that cuts an icon
     int top = -1, bottom = -1;      // rows of the first island at its centre column (taskbar-relative)
     RowRegion region;               // FloatBar's region, read right after the frame arrived
+    std::wstring above;             // class of the window right above the taskbar (the border's place)
+    std::wstring foreground;        // class of the foreground window
 };
 
 // Captures the primary taskbar on its own thread and reduces every frame to a Frame.
@@ -212,6 +215,8 @@ private:
             }
         }
         f.region = ReadRegionRow(setup_.taskbar, wr, wr.top + row);
+        f.above = fb::WindowClass(GetWindow(setup_.taskbar, GW_HWNDPREV));
+        f.foreground = fb::WindowClass(GetForegroundWindow());
         // An icon right at an island edge is being cut by it - if that edge is
         // FloatBar's clip. Explorer sometimes leaves part of the taskbar
         // transparent for a frame while it inserts a button; that edge is not
@@ -499,6 +504,22 @@ public:
     std::optional<Frame> Latest() const { return recorder_.Latest(); }
     std::vector<Frame> Between(double from, double to) const { return recorder_.Between(from, to); }
 
+    // Puts the mouse at `pt`. Where it is when it is moved next shows whether
+    // someone else moved it meanwhile; then the scenario runs again (see Run).
+    void HoldCursor(POINT pt) {
+        POINT now;
+        if (held_ && GetCursorPos(&now) && (now.x != held_->x || now.y != held_->y)) interference_ = "someone moved the mouse";
+        SetCursorPos(pt.x, pt.y);
+        held_ = pt;
+    }
+    void ReleaseCursor(POINT pt) {
+        HoldCursor(pt);
+        held_.reset();
+    }
+    // The scenario opens Start itself (otherwise shell UI in the foreground means
+    // someone is using the computer: see RunScenario).
+    void AllowShellUi() { shellUiAllowed_ = true; }
+
     std::optional<fb::Islands> ReadIslands() {
         for (int attempt = 0; attempt < 3; ++attempt) {
             const fb::BoundsResult r = reader_.Compute(taskbar_);
@@ -564,6 +585,7 @@ private:
     HWND taskbar_ = nullptr;
     RECT wr_{};
     UINT dpi_ = 96;
+    double refreshMs_ = 1000.0 / 60;  // the primary monitor's refresh period
     BYTE bg_[4] = {};
     fb::Islands initial_;  // the layout before any scenario, for the app/tray split
 
@@ -578,6 +600,9 @@ private:
     std::vector<Event> events_;
     std::vector<Check> checks_;
     int warnings_ = 0;
+    std::optional<POINT> held_;
+    bool shellUiAllowed_ = false;
+    std::string interference_;  // what someone using the computer did during the scenario
 };
 
 std::vector<Interval> Suite::ExpectedRuns(const fb::Islands& is) const {
@@ -606,13 +631,7 @@ std::vector<Interval> Suite::ExpectedRuns(const fb::Islands& is) const {
         add(l, r);
         return runs;
     }
-    if (c.separateStart && is.hasSplit) {
-        const LONG half = Scale(kStartGapLogicalPx) / 2;
-        add(is.app.left - pad, is.split - half);
-        add(is.split + half, is.app.right + pad);
-    } else {
-        add(is.app.left - pad, is.app.right + pad);
-    }
+    add(is.app.left - pad, is.app.right + pad);
     if (c.showWidgets) {
         for (const RECT& e : is.extras) add(e.left - pad, e.right + pad);
     }
@@ -647,15 +666,20 @@ int Suite::RemoveFlashes(std::vector<Frame>& frames, double& first) const {
         ++flashes;
         std::fill(flash.begin() + static_cast<std::ptrdiff_t>(from), flash.begin() + static_cast<std::ptrdiff_t>(to), char{1});
     };
-    auto covered = [&](const Frame& f) {
-        int n = 0;
-        for (const Interval& g : f.region.runs) n += std::max(0, std::min(g.r, static_cast<int>(wr_.right)) - std::max(g.l, static_cast<int>(wr_.left)));
-        return f.region.clipped ? n : wr_.right - wr_.left;
+    // Visible pixels outside the region: DWM ignored it, or another window (a
+    // notification sliding past) drew over the backdrop. Either way it is not
+    // FloatBar's picture. The region is read just after the frame arrived, so
+    // the previous frame's region (on screen while islands move) counts too.
+    auto inRegion = [&](const Frame& f, int x) {
+        return !f.region.clipped || std::ranges::any_of(f.region.runs, [x](const Interval& g) { return x >= g.l && x < g.r; });
     };
-    // Much more of the taskbar shows than its region covers: DWM ignored it. The
-    // region is read just after the frame arrived, so compare with the previous
-    // frame's region too (the one on screen while islands move fast).
-    auto beyondRegion = [&](size_t k) { return k > 0 && frames[k].visibleCols > std::max(covered(frames[k]), covered(frames[k - 1])) + 40; };
+    auto beyondRegion = [&](size_t k) {
+        int outside = 0;
+        for (const Interval& v : frames[k].visible) {
+            for (int x = v.l; x < v.r; ++x) outside += !inRegion(frames[k], x) && !inRegion(frames[k - 1], x);
+        }
+        return outside > 8;
+    };
     for (size_t i = 1; i + 1 < frames.size(); ++i) {
         if (beyondRegion(i)) {
             size_t j = i;
@@ -704,17 +728,24 @@ int EdgeOf(const Frame& f, int which, int split) {
     }
 }
 
-EdgeStats AnalyzeEdge(const std::vector<Frame>& frames, int which, int split) {
+EdgeStats AnalyzeEdge(const std::vector<Frame>& frames, int which, int split, double refreshMs) {
     EdgeStats st;
     std::vector<double> steps;
     int prev = INT_MIN, dir = 0;
+    double prevMs = -1;
     for (const Frame& f : frames) {
+        const double gapMs = f.ms - prevMs;
+        const bool moving = st.last >= 0 && st.last == prevMs;  // this edge moved in the frame before
+        prevMs = f.ms;
         const int v = EdgeOf(f, which, split);
         if (v == INT_MIN) continue;
         if (st.from == INT_MIN) st.from = v;
         if (prev != INT_MIN && v != prev) {
             const int d = v - prev;
-            steps.push_back(std::abs(d) / static_cast<double>(f.accumulated));
+            // Refreshes the step took: several when the capture merged presents, or
+            // when, mid-motion, the compositor presented nothing at all for a while (a
+            // hitch of the whole screen, seen lasting a 60 Hz frame; the motion went on).
+            steps.push_back(std::abs(d) / std::max<double>(f.accumulated, moving ? std::round(gapMs / refreshMs) : 1));
             const int nd = d > 0 ? 1 : -1;
             if (dir && nd != dir) {
                 if (!st.reversals) st.firstReversal = f.ms;
@@ -750,7 +781,7 @@ EdgeStats AnalyzeEdge(const std::vector<Frame>& frames, int which, int split) {
 void Suite::CheckFlashes(const std::string& what, std::vector<Frame>& frames, double from) {
     double first = -1;
     const int flashes = RemoveFlashes(frames, first);
-    if (flashes) Warn(Format("%s: %d flash(es) of the unclipped taskbar, first at +%.0f ms (Windows drops the region for a frame or two)", what.c_str(), flashes, first - from));
+    if (flashes) Warn(Format("%s: %d time(s) more than the islands showed, first at +%.0f ms (Windows dropping the region, or another window drawing there)", what.c_str(), flashes, first - from));
 }
 
 void Suite::CheckMotion(const std::string& what, double from, double to, MotionOptions o) {
@@ -776,7 +807,7 @@ void Suite::CheckMotion(const std::string& what, double from, double to, MotionO
     const int split = SideSplit();
     std::string reversals, chunks;
     for (int e = 0; e < 4; ++e) {
-        const EdgeStats st = AnalyzeEdge(frames, e, split);
+        const EdgeStats st = AnalyzeEdge(frames, e, split, refreshMs_);
         if (!st.positions) continue;
         Note(Format("%s %d -> %d: +%.0f..+%.0f ms, %d positions, step median %.1f / max %.1f px, longest pause %.0f ms%s", kNames[e],
                     st.from, st.to, st.first - from, st.last - from, st.positions, st.medianStep, st.maxStep, st.longestPause,
@@ -874,11 +905,11 @@ void Suite::CheckRing(const std::string& what, double from, double to) {
 void Suite::WriteFrames(double origin) const {
     FILE* file = nullptr;
     if (_wfopen_s(&file, (dir_ + L"\\frames.csv").c_str(), L"w") == 0 && file) {
-        std::fprintf(file, "ms,accumulated,visible_cols,visible,border,icon_l,icon_r,cut_at,top,bottom,region_clipped,region\n");
+        std::fprintf(file, "ms,accumulated,visible_cols,visible,border,icon_l,icon_r,cut_at,top,bottom,region_clipped,region,above,foreground\n");
         for (const Frame& f : recorder_.All()) {
-            std::fprintf(file, "%.2f,%u,%d,%s,%s,%d,%d,%d,%d,%d,%d,%s\n", f.ms - origin, f.accumulated, f.visibleCols, RunsText(f.visible).c_str(),
+            std::fprintf(file, "%.2f,%u,%d,%s,%s,%d,%d,%d,%d,%d,%d,%s,%s,%s\n", f.ms - origin, f.accumulated, f.visibleCols, RunsText(f.visible).c_str(),
                          f.ring.empty() ? "" : RunsText(f.ring).c_str(), f.iconL, f.iconR, f.cutAt, f.top, f.bottom, f.region.clipped ? 1 : 0,
-                         RunsText(f.region.runs).c_str());
+                         RunsText(f.region.runs).c_str(), Utf8(f.above).c_str(), Utf8(f.foreground).c_str());
         }
         std::fclose(file);
     }
@@ -888,6 +919,14 @@ void Suite::WriteFrames(double origin) const {
         for (const Event& e : events_) std::fprintf(file, "%.2f,%s\n", e.ms - origin, e.what.c_str());
         std::fclose(file);
     }
+}
+
+// Windows the shell brings up (Start, Search, flyouts, a clicked taskbar). While
+// one of them has the focus, explorer lifts the taskbars above every other window.
+bool IsShellUi(const std::wstring& cls) {
+    static const wchar_t* kClasses[] = {L"Windows.UI.Core.CoreWindow", L"Shell_TrayWnd", L"Shell_SecondaryTrayWnd",
+                                        L"XamlExplorerHostIslandWindow", L"TopLevelWindowForOverflowXamlIsland", L"NotifyIconOverflowWindow"};
+    return std::ranges::any_of(kClasses, [&](const wchar_t* c) { return cls == c; });
 }
 
 bool Suite::RunScenario(const Scenario& s) {
@@ -903,6 +942,9 @@ bool Suite::RunScenario(const Scenario& s) {
     events_.clear();
     checks_.clear();
     windows_.clear();
+    held_.reset();
+    shellUiAllowed_ = false;
+    interference_.clear();
     WaitTaskbarIdle();
 
     Recorder::Setup setup;
@@ -923,11 +965,20 @@ bool Suite::RunScenario(const Scenario& s) {
     Stop();
     recorder_.Stop();
     WriteFrames(origin);
+    if (!shellUiAllowed_) {
+        for (const Frame& f : recorder_.All()) {
+            if (IsShellUi(f.foreground)) {
+                interference_ = Utf8(f.foreground) + " came to the foreground";
+                break;
+            }
+        }
+    }
+    if (!interference_.empty()) Expect("nobody else used the computer during the test", false, interference_ + ", so the results mean little");
 
     bool pass = true;
     for (const Check& c : checks_) {
         pass &= c.ok;
-        warnings_ += c.warn;
+        warnings_ += c.warn && interference_.empty();
     }
     FILE* report = nullptr;
     if (_wfopen_s(&report, (options_.out + L"\\report.txt").c_str(), L"a") == 0 && report) {
@@ -971,6 +1022,14 @@ int Suite::Run(const std::vector<Scenario>& scenarios) {
     if (!taskbar_ || fb::HasRegion(taskbar_)) fb::ClearAllTaskbars();
     GetWindowRect(taskbar_, &wr_);
     dpi_ = GetDpiForWindow(taskbar_) ? GetDpiForWindow(taskbar_) : 96;
+    MONITORINFOEXW mi = {};
+    mi.cbSize = sizeof(mi);
+    DEVMODEW mode = {};
+    mode.dmSize = sizeof(mode);
+    if (GetMonitorInfoW(MonitorFromWindow(taskbar_, MONITOR_DEFAULTTOPRIMARY), &mi) && EnumDisplaySettingsW(mi.szDevice, ENUM_CURRENT_SETTINGS, &mode) &&
+        mode.dmDisplayFrequency > 1) {
+        refreshMs_ = 1000.0 / mode.dmDisplayFrequency;
+    }
     backdrop_.Show(wr_);
     Sleep(300);
 
@@ -1009,16 +1068,21 @@ int Suite::Run(const std::vector<Scenario>& scenarios) {
         return 2;
     }
     initial_ = *initial;
-    std::printf("taskbar %ld,%ld-%ld,%ld at %u dpi; background %u,%u,%u; app buttons %ld-%ld (%d), tray %ld-%ld\n", wr_.left, wr_.top, wr_.right,
-                wr_.bottom, dpi_, bg_[2], bg_[1], bg_[0], initial_.app.left, initial_.app.right, initial_.appCount, initial_.tray.left,
-                initial_.tray.right);
+    std::printf("taskbar %ld,%ld-%ld,%ld at %u dpi, %.0f Hz; background %u,%u,%u; app buttons %ld-%ld (%d), tray %ld-%ld\n", wr_.left, wr_.top,
+                wr_.right, wr_.bottom, dpi_, 1000 / refreshMs_, bg_[2], bg_[1], bg_[0], initial_.app.left, initial_.app.right, initial_.appCount,
+                initial_.tray.left, initial_.tray.right);
 
     int passed = 0, failed = 0;
     std::vector<std::string> failures;
     for (const Scenario& s : scenarios) {
         const bool picked = options_.only.empty() || std::find(options_.only.begin(), options_.only.end(), s.name) != options_.only.end();
         if (!picked || (s.interactive && !options_.interactive) || (s.manual && options_.only.empty())) continue;
-        if (RunScenario(s)) ++passed;
+        bool pass = RunScenario(s);
+        for (int retry = 0; !interference_.empty() && retry < 2; ++retry) {
+            std::printf("   %s during the test: running it again\n", interference_.c_str());
+            pass = RunScenario(s);
+        }
+        if (pass) ++passed;
         else ++failed, failures.push_back(s.name);
     }
 
@@ -1099,18 +1163,35 @@ HWND FindChild(HWND parent, const wchar_t* text) {
 }
 
 // Clicks a settings checkbox or button the way the user would, minus the mouse.
+// Posted, like a real click: a message sent from another process is handled
+// even while FloatBar waits inside a call to explorer (SetWindowRgn), which a
+// real click never is.
 bool Click(HWND settings, const wchar_t* text, bool check) {
     HWND control = FindChild(settings, text);
     if (!control) return false;
     if (check) SendMessageW(control, BM_SETCHECK, SendMessageW(control, BM_GETCHECK, 0, 0) == BST_CHECKED ? BST_UNCHECKED : BST_CHECKED, 0);
-    SendMessageW(settings, WM_COMMAND, MAKEWPARAM(GetDlgCtrlID(control), BN_CLICKED), reinterpret_cast<LPARAM>(control));
+    PostMessageW(settings, WM_COMMAND, MAKEWPARAM(GetDlgCtrlID(control), BN_CLICKED), reinterpret_cast<LPARAM>(control));
     return true;
+}
+
+// Presses `keys` together, then lets go of them in reverse order.
+void PressKeys(std::initializer_list<WORD> keys) {
+    std::vector<INPUT> input;
+    for (int up = 0; up < 2; ++up) {
+        for (size_t i = 0; i < keys.size(); ++i) {
+            INPUT in = {};
+            in.type = INPUT_KEYBOARD;
+            in.ki.wVk = up ? keys.begin()[keys.size() - 1 - i] : keys.begin()[i];
+            in.ki.dwFlags = up ? KEYEVENTF_KEYUP : 0;
+            input.push_back(in);
+        }
+    }
+    SendInput(static_cast<UINT>(input.size()), input.data(), sizeof(INPUT));
 }
 
 void MoveCursor(Suite& s, bool ontoTaskbar) {
     const RECT& wr = s.TaskbarRect();
-    if (ontoTaskbar) SetCursorPos(wr.left + 40, s.RowY());
-    else SetCursorPos((wr.left + wr.right) / 2, wr.top - 400);
+    s.HoldCursor(ontoTaskbar ? POINT{wr.left + 40, s.RowY()} : POINT{(wr.left + wr.right) / 2, wr.top - 400});
 }
 
 const Scenario kScenarios[] = {
@@ -1271,20 +1352,6 @@ const Scenario kScenarios[] = {
          s.CheckMotion("close", t, s.Settle(t), {.smooth = false, .lagMs = 0});
          s.ExpectLayout("after close");
      }},
-    {"separate-start", "Start in its own island; apps open and close beside it", false, true,
-     [](fb::Config& c) { c.separateStart = true; },
-     [](Suite& s) {
-         s.ExpectLayout("after start");
-         const double t = s.Mark("open and close an app");
-         OpenAndClose(s, "");
-         int merged = 0;
-         for (const Frame& f : s.Between(t, NowMs())) {
-             int appSide = 0;
-             for (const Interval& r : f.visible) appSide += r.r <= s.TaskbarRect().right - s.Scale(200);
-             merged += appSide < 2;
-         }
-         s.Expect("Start stays separate in every frame", merged == 0, merged ? Format("%d frames without the gap", merged) : "");
-     }},
     {"bar", "bar mode: one bar across the taskbar that never moves", false, true, [](fb::Config& c) { c.mode = fb::LayoutMode::Bar; },
      [](Suite& s) {
          s.ExpectLayout("after start");
@@ -1367,18 +1434,18 @@ const Scenario kScenarios[] = {
          HWND settings = WaitWindow(L"FloatBarSettings", s.FloatBar().pid, 3000);
          s.Expect("the Settings window opens", settings != nullptr);
          if (!settings) return;
-         double t = s.Mark("tick 'Separate Start into its own island'");
-         s.Expect("the checkbox exists", Click(settings, L"Separate Start into its own island", true));
-         s.Config().separateStart = true;
+         double t = s.Mark("untick 'Enabled'");
+         s.Expect("the checkbox exists", Click(settings, L"Enabled", true));
+         s.Config().enabled = false;
          s.Settle(t);
-         s.ExpectLayout("with Start separate");
+         s.ExpectLayout("disabled");
          Sleep(600);  // the settings file is written 400 ms after the last change
-         s.Expect("the change is saved to config.ini", fb::LoadConfig().separateStart);
-         t = s.Mark("untick it");
-         Click(settings, L"Separate Start into its own island", true);
-         s.Config().separateStart = false;
+         s.Expect("the change is saved to config.ini", !fb::LoadConfig().enabled);
+         t = s.Mark("tick it again");
+         Click(settings, L"Enabled", true);
+         s.Config().enabled = true;
          s.Settle(t);
-         s.ExpectLayout("with Start joined again");
+         s.ExpectLayout("enabled again");
          t = s.Mark("press 'Exit FloatBar'");
          s.Expect("the Exit button exists", Click(settings, L"Exit FloatBar", false));
          s.Expect("FloatBar exits", WaitForSingleObject(s.FloatBar().handle, 5000) == WAIT_OBJECT_0);
@@ -1433,7 +1500,7 @@ const Scenario kScenarios[] = {
          MoveCursor(s, false);
          const double hidden = s.WaitFor([](const Frame& fr) { return fr.visibleCols == 0; }, 3000);
          s.Expect("hides again after the mouse leaves", hidden >= 0, hidden >= 0 ? Format("after %.0f ms", hidden - t) : "not within 3 s");
-         SetCursorPos(saved.x, saved.y);
+         s.ReleaseCursor(saved);
      }},
     {"tray-hover", "tray island only while the mouse is over the taskbar", true, false, [](fb::Config& c) { c.trayMode = fb::TrayMode::Hover; },
      [](Suite& s) {
@@ -1452,7 +1519,40 @@ const Scenario kScenarios[] = {
          s.Config().trayMode = fb::TrayMode::Hover;
          s.CheckMotion("tray disappears", t, s.Settle(t, 500, 1500), {.lagMs = 0, .checkCuts = false});
          s.ExpectLayout("mouse away again");
-         SetCursorPos(saved.x, saved.y);
+         s.ReleaseCursor(saved);
+     }},
+    {"start-menu", "Start opens and closes over the islands; the border stays on them", true, true,
+     [](fb::Config& c) {
+         c.borderWidth = 2;
+         c.borderColor = RGB(kTestBorderBgra[2], kTestBorderBgra[1], kTestBorderBgra[0]);
+         c.borderOpacity = 100;
+     },
+     [](Suite& s) {
+         s.AllowShellUi();
+         double t = s.Mark("open Start (Ctrl+Esc)");
+         PressKeys({VK_CONTROL, VK_ESCAPE});
+         const std::vector<Frame> open = s.Between(t, s.Settle(t));
+         const auto hidden = std::ranges::count_if(open, [](const Frame& f) { return f.ring.empty(); });
+         if (hidden) {
+             s.Warn(Format("Start open: border under the taskbar in %zd of %zu frames (explorer lifts the taskbar above every ordinary window)",
+                           hidden, open.size()));
+         }
+         s.ExpectLayout("Start open");
+         t = s.Mark("close Start (Esc)");
+         // Now and then Esc doesn't close it: press again, but only while Start
+         // still has the focus (never into someone's app).
+         auto startGone = [](const Frame& f) { return !IsShellUi(f.foreground); };
+         double closed = -1;
+         for (int i = 0; i < 3 && closed < 0 && IsShellUi(fb::WindowClass(GetForegroundWindow())); ++i) {
+             PressKeys({VK_ESCAPE});
+             closed = s.WaitFor(startGone, 1000);
+         }
+         s.Expect("Start closes", closed >= 0);
+         const double back = s.WaitFor([](const Frame& f) { return !f.ring.empty(); }, 2000);
+         s.Expect("the border is back on the islands soon after Start closes", back >= 0 && closed >= 0 && back - closed <= 150,
+                  back >= 0 && closed >= 0 ? Format("%.0f ms after", back - closed) : "not within 2 s");
+         s.CheckRing("Start closed", back >= 0 ? back : t, s.Settle(t));
+         s.ExpectLayout("Start closed");
      }},
     {"fullscreen", "a fullscreen app hides the taskbar; closing it brings the islands back", true, true, nullptr,
      [](Suite& s) {
@@ -1476,6 +1576,47 @@ const Scenario kScenarios[] = {
          s.Settle(t2);
          s.ExpectLayout("after the fullscreen app");
      }},
+    // Does a slow monitor's taskbar changing slow down the frame clock for all?
+    {"pacing", "frame pacing: region changes on the primary taskbar alone, then on every taskbar", false, false, nullptr,
+     [](Suite& s) {
+         using WaitClock = DWORD(WINAPI*)(UINT, const HANDLE*, DWORD);
+         const auto waitClock = reinterpret_cast<WaitClock>(
+             GetProcAddress(LoadLibraryExW(L"dcomp.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32), "DCompositionWaitForCompositorClock"));
+         const std::vector<HWND> taskbars = fb::FindTaskbars();
+         auto run = [&](bool all, bool clock, bool idle = false) {
+             std::vector<double> gaps;
+             double last = NowMs();
+             for (int i = 0; i < (idle ? 300 : 1500); ++i) {
+                 for (HWND h : taskbars) {
+                     if (idle || (!all && h != s.Taskbar())) continue;
+                     RECT wr;
+                     GetWindowRect(h, &wr);
+                     const int cut = 100 + i % 200;
+                     SetWindowRgn(h, CreateRectRgn(cut, 0, wr.right - wr.left - cut, wr.bottom - wr.top), TRUE);
+                 }
+                 if (clock) waitClock(0, nullptr, 100);
+                 else DwmFlush();
+                 gaps.push_back(NowMs() - last);
+                 last = NowMs();
+             }
+             std::ranges::sort(gaps);
+             s.Note(Format("%s, %s: median %.2f ms, p90 %.2f, p99 %.2f, max %.2f, over 10 ms: %lld", clock ? "compositor clock" : "DwmFlush",
+                           idle ? "nothing changing" : all ? "every taskbar" : "primary only", gaps[gaps.size() / 2], gaps[gaps.size() * 9 / 10],
+                           gaps[gaps.size() * 99 / 100], gaps.back(), std::ranges::count_if(gaps, [](double g) { return g > 10; })));
+         };
+         run(false, false);
+         run(true, false);
+         run(false, false, true);
+         if (waitClock) {
+             run(false, true);
+             run(true, true);
+             run(false, true, true);
+         } else {
+             s.Note("DCompositionWaitForCompositorClock unavailable");
+         }
+         fb::ClearAllTaskbars();
+     },
+     true},
     // Does re-sending an unchanged region to an idle taskbar ever make DWM drop it?
     {"region-stress", "re-send the same region as fast as possible for 20 s with nothing moving; count flashes", false, true, nullptr,
      [](Suite& s) {

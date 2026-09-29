@@ -34,8 +34,7 @@ namespace fb::rules {
 // knowing their ids.
 inline constexpr wchar_t kAppSideRootAutomationId[] = L"TaskbarFrame";
 inline constexpr wchar_t kStartButtonAutomationId[] = L"StartButton";
-// Pinned/running app buttons. Everything before the first one in the Start
-// cluster (Start, Search, Task View) can become its own island.
+// Pinned/running app buttons.
 inline constexpr wchar_t kAppButtonClass[] = L"Taskbar.TaskListButtonAutomationPeer";
 // While buttons slide (several apps opening or closing at once), neighbours move
 // on slightly different schedules and a closed button leaves its slot empty for

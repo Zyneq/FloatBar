@@ -19,7 +19,7 @@ constexpr int kFailuresBeforeUnclip = 3;
 // How long the taskbar stays revealed after the mouse leaves it.
 constexpr DWORD kHoverLingerMs = 600;
 
-// How long after a region change it keeps being re-sent (see NeedsRegionRefresh);
+// How long after a region change it keeps being re-sent (see Engine::Refresh);
 // the dropped regions measured came within a few ms of a change.
 constexpr double kRefreshAfterChangeMs = 600;
 
@@ -29,10 +29,7 @@ enum State : LONG { kShapes = 0, kFilled = 1, kHidden = 2 };
 constexpr int kIdApp = 0;
 constexpr int kIdTray = 1;
 constexpr int kIdBar = 2;
-constexpr int kIdStart = 3;
 constexpr int kIdExtra = 100;  // + index
-// Gap between the Start island and the app island ("separate Start").
-constexpr int kStartGapLogicalPx = 8;
 
 std::wstring Label(HWND hwnd, bool primary) {
     return (primary ? L"primary " : L"secondary ") + FormatHwnd(hwnd);
@@ -395,9 +392,8 @@ Engine::UpdateResult Engine::OnBounds(BoundsWorker::Reply* raw) {
     // The same confirms that the buttons stood still before the first clip.
     result.recheck = (wasMoving && !tb->filter.Transitioning()) || (!tb->applied && !tb->filter.Settled(NowMs()));
     const TrackedEdges& tracked = tb->filter.Tracked();
-    log::Debug(L"%s: bounds read in %lu ms: app %s #%d split %ld -> %s split %ld%s%s%s%s", label.c_str(), reply->ms,
-               FormatRect(read.islands->app).c_str(), read.islands->appCount, read.islands->split, SpanText(tb->display.app).c_str(),
-               tb->display.split, tracked.appLeft ? L" trackL" : L"", tracked.appRight ? L" trackR" : L"", tracked.split ? L" trackS" : L"",
+    log::Debug(L"%s: bounds read in %lu ms: app %s #%d -> %s%s%s%s", label.c_str(), reply->ms, FormatRect(read.islands->app).c_str(),
+               read.islands->appCount, SpanText(tb->display.app).c_str(), tracked.appLeft ? L" trackL" : L"", tracked.appRight ? L" trackR" : L"",
                tb->filter.Transitioning() ? L" (moving)" : L"");
     if (tb->filter.Transitioning()) {
         worker_.Request(tb->hwnd);  // read back to back while buttons move
@@ -470,16 +466,7 @@ void Engine::Layout(Taskbar& tb, bool force, const Context& ctx, bool freshReadi
         const RECT bar = {wr.left + padding, wr.top, wr.right - padding, wr.bottom};
         islands.push_back({trimShowDesktop ? WithoutShowDesktop(bar, is) : bar, kIdBar});
     } else {
-        if (config_.separateStart && is.hasSplit) {
-            // Cut a gap where the app buttons begin. Both neighbouring buttons have
-            // empty space beside their icons, so a settled gap never cuts an icon
-            // (while it slides it leads its readings; see ReadingFilter).
-            const LONG half = scale(kStartGapLogicalPx) / 2;
-            islands.push_back({{is.app.left - padding, is.app.top, is.split - half, is.app.bottom}, kIdStart, tr.appLeft, tr.split});
-            islands.push_back({{is.split + half, is.app.top, is.app.right + padding, is.app.bottom}, kIdApp, tr.split, tr.appRight});
-        } else {
-            islands.push_back({Padded(is.app, padding), kIdApp, tr.appLeft, tr.appRight});
-        }
+        islands.push_back({Padded(is.app, padding), kIdApp, tr.appLeft, tr.appRight});
         if (config_.showWidgets) {
             for (size_t i = 0; i < is.extras.size(); ++i) islands.push_back({Padded(is.extras[i], padding), kIdExtra + static_cast<int>(i)});
         }
@@ -627,6 +614,7 @@ void Engine::SyncLayers(Taskbar& tb) {
         for (const Span& s : tb.motion.Shown()) shapes.push_back(SpanToWindowRect(tb.wr, s.rect, style));
     }
 
+    bool placed = true;
     auto sync = [&](std::unique_ptr<Backdrop>& layer, bool wanted, Backdrop::Layer kind) {
         if (!wanted) {
             layer.reset();
@@ -634,26 +622,33 @@ void Engine::SyncLayers(Taskbar& tb) {
         }
         if (!layer) layer = std::make_unique<Backdrop>(kind);
         if (shapes.empty()) layer->Hide();
-        else layer->Show(tb.hwnd, tb.wr, shapes, radius, config_, tb.dpi);
+        else placed &= layer->Show(tb.hwnd, tb.wr, shapes, radius, config_, tb.dpi);
     };
     sync(tb.fill, config_.background != Background::Default && FillVisible(), Backdrop::Layer::Fill);
     // The border stays on at full width too, so the morph ends without a pop.
     sync(tb.border, BorderActive(), Backdrop::Layer::Border);
+    if (placed == tb.misplaced) {
+        log::Debug(L"%s: %s", Label(tb.hwnd, tb.primary).c_str(),
+                   placed ? L"layers are next to the taskbar again" : L"explorer lifted the taskbar above its layers; retrying");
+    }
+    tb.misplaced = !placed;
 }
 
-bool Engine::NeedsRegionRefresh() const {
+bool Engine::NeedsRefresh() const {
     const double now = NowMs();
     for (const Taskbar& tb : taskbars_) {
-        if (tb.applied && tb.state != kFilled && now < tb.refreshUntil) return true;
+        if (tb.misplaced || (tb.applied && tb.state != kFilled && now < tb.refreshUntil)) return true;
     }
     return false;
 }
 
-void Engine::RefreshRegions() {
+void Engine::Refresh() {
     const double now = NowMs();
     for (Taskbar& tb : taskbars_) {
-        if (!tb.applied || tb.state == kFilled || now >= tb.refreshUntil || !IsWindow(tb.hwnd)) continue;
-        if (now - tb.regionAt < kRegionRefreshMs) continue;  // set just now anyway
+        if (!IsWindow(tb.hwnd)) continue;
+        if (tb.misplaced) SyncLayers(tb);
+        if (!tb.applied || tb.state == kFilled || now >= tb.refreshUntil) continue;
+        if (now - tb.regionAt < kRefreshMs) continue;  // set just now anyway
         const double until = tb.refreshUntil;
         ApplyRegion(tb, true);
         tb.refreshUntil = until;  // re-sending is not a change
@@ -688,6 +683,7 @@ void Engine::ClearAll() {
         tb.applied.reset();
         tb.fill.reset();
         tb.border.reset();
+        tb.misplaced = false;
         tb.motion.Clear();
         tb.filter.Reset();
         tb.logical = -1;

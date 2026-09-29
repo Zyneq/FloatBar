@@ -67,19 +67,20 @@ public:
     bool NeedsHoverPolling() const;
     bool PollHover();
 
-    // Island animation. While Animating(), call Animate() once per display frame
-    // (after DwmFlush); it positions everything for "now".
+    // Island animation. While Animating(), call Animate() once per composition
+    // frame; it positions everything for "now".
     bool Animating() const;
     void Animate();
 
-    // Now and then DWM shows a taskbar unclipped right after its region changed
+    // While NeedsRefresh(), call Refresh() every kRefreshMs. It re-sends regions:
+    // now and then DWM shows a taskbar unclipped right after its region changed
     // while explorer is busy (the region stays set) until the region is set
     // again; seen lasting up to 460 ms. Re-sending it to an idle taskbar never
-    // did that (44,000 calls measured). While NeedsRegionRefresh(), call
-    // RefreshRegions() every kRegionRefreshMs.
-    static constexpr UINT kRegionRefreshMs = 50;
-    bool NeedsRegionRefresh() const;
-    void RefreshRegions();
+    // did that (44,000 calls measured). And it puts the border back above a
+    // taskbar that explorer lifted out of its reach (Start or Search open).
+    static constexpr UINT kRefreshMs = 50;
+    bool NeedsRefresh() const;
+    void Refresh();
 
     void ClearAll();
     std::wstring Status() const;
@@ -118,6 +119,7 @@ private:
 
         std::unique_ptr<Backdrop> fill;    // custom background, below the taskbar
         std::unique_ptr<Backdrop> border;  // outline, above the taskbar
+        bool misplaced = false;            // a layer could not be stacked next to the taskbar
     };
 
     // Foreground/maximised state shared by all taskbars during one update.

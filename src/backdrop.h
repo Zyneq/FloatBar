@@ -24,13 +24,16 @@ public:
     ~Backdrop();
 
     // `shapes` are window-relative rectangles (as SpanToWindowRect returns them);
-    // `dpi` scales the config's logical border width.
-    void Show(HWND taskbar, const RECT& windowRect, const std::vector<RECT>& shapes, int radius, const Config& config, UINT dpi);
+    // `dpi` scales the config's logical border width. Returns false if the
+    // window can't be stacked next to the taskbar right now: while Start or
+    // Search is open, explorer lifts the taskbar into a z-order band that no
+    // ordinary window can join. Show again a little later.
+    bool Show(HWND taskbar, const RECT& windowRect, const std::vector<RECT>& shapes, int radius, const Config& config, UINT dpi);
     void Hide();
 
 private:
     void Render(const RECT& windowRect, const std::vector<RECT>& shapes, int radius, const Config& config, UINT dpi);
-    void Restack(HWND taskbar);
+    bool Restack(HWND taskbar);
 
     Layer layer_;
     HWND hwnd_ = nullptr;

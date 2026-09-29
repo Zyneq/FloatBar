@@ -34,4 +34,4 @@ target_link_libraries(floatbar PRIVATE ole32 oleaut32 uiautomationcore user32 gd
 file(GLOB PROBE_SOURCES CONFIGURE_DEPENDS tools/probe/*.cpp)
 add_executable(floatbar-probe ${PROBE_SOURCES} src/bounds.cpp src/uia_util.cpp src/region.cpp src/config.cpp src/motion.cpp res/app.manifest)
 target_include_directories(floatbar-probe PRIVATE src)
-target_link_libraries(floatbar-probe PRIVATE d3d11 dxgi ole32 oleaut32 uiautomationcore user32 gdi32 shell32)
+target_link_libraries(floatbar-probe PRIVATE d3d11 dxgi dwmapi ole32 oleaut32 uiautomationcore user32 gdi32 shell32)

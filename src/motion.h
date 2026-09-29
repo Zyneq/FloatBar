@@ -22,7 +22,7 @@ struct Span {
 
 // Which filtered edges moved by following explorer's slide in the last reading.
 struct TrackedEdges {
-    bool appLeft = false, appRight = false, trayLeft = false, trayRight = false, split = false;
+    bool appLeft = false, appRight = false, trayLeft = false, trayRight = false;
 };
 
 // Turns raw UI Automation readings into island bounds that never cut an icon.
@@ -66,7 +66,6 @@ public:
     void Reset() { *this = {}; }
 
 private:
-    enum class Grow { Left, Right, None };
     struct Edge {
         LONG value = 0;           // what the islands use
         LONG final = 0;           // final-layout candidate of the current transition
@@ -81,7 +80,8 @@ private:
     }
     void InitAll(const Islands& fresh, LONG centre2);  // trust `fresh` completely; ends any transition
     // Folds a reading into one edge; true if the edge followed explorer's slide.
-    bool Step(Edge& e, LONG reading, Grow grow, bool restart, bool plausible) const;
+    // `out` is the way that adds room: -1 for a left edge, 1 for a right edge.
+    bool Step(Edge& e, LONG reading, int out, bool restart, bool plausible) const;
 
     bool valid_ = false;
     bool transition_ = false;
@@ -90,14 +90,11 @@ private:
     double lastRestart_ = 0;  // when the transition began or the button set last changed
     double lastChange_ = 0;   // when a reading last differed from the one before
     LONG continuity_ = 12;
-    LONG mirror_ = 0;        // app left + right when the buttons were last centred, else 0
-    LONG settledLeft_ = 0;    // the app island's edges and split when readings last settled
-    LONG settledRight_ = 0;
-    LONG settledSplit_ = 0;
-    bool splitArmed_ = false; // the split's slide is about to start
+    LONG mirror_ = 0;         // app left + right when the buttons were last centred, else 0
+    LONG settledRight_ = 0;   // the app island's right edge when readings last settled
     Islands last_;            // the previous reading
     Islands trusted_;         // the last plausible reading: which buttons exist
-    Edge appLeft_, appRight_, trayLeft_, trayRight_, split_;
+    Edge appLeft_, appRight_, trayLeft_, trayRight_;
 };
 
 // A jump (a changed layout, the morph to full width, the tray appearing) glides

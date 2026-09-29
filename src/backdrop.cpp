@@ -61,12 +61,12 @@ void Backdrop::Hide() {
     if (hwnd_) ShowWindow(hwnd_, SW_HIDE);
 }
 
-void Backdrop::Show(HWND taskbar, const RECT& windowRect, const std::vector<RECT>& shapes, int radius, const Config& config, UINT dpi) {
+bool Backdrop::Show(HWND taskbar, const RECT& windowRect, const std::vector<RECT>& shapes, int radius, const Config& config, UINT dpi) {
     if (!hwnd_) {
         EnsureClass();
         hwnd_ = CreateWindowExW(WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE | WS_EX_TOPMOST, kClassName,
                                 L"", WS_POPUP, 0, 0, 0, 0, nullptr, nullptr, GetModuleHandleW(nullptr), nullptr);
-        if (!hwnd_) return;
+        if (!hwnd_) return true;  // nothing to place
         key_.clear();
     }
 
@@ -82,25 +82,26 @@ void Backdrop::Show(HWND taskbar, const RECT& windowRect, const std::vector<RECT
         Render(windowRect, shapes, radius, config, dpi);
         key_ = std::move(key);
     }
-    Restack(taskbar);
+    return Restack(taskbar);
 }
 
-void Backdrop::Restack(HWND taskbar) {
+bool Backdrop::Restack(HWND taskbar) {
     const UINT flags = SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW;
     const bool visible = IsWindowVisible(hwnd_) != FALSE;
     if (layer_ == Layer::Fill) {
         // Directly below the taskbar. Inserting after a non-topmost taskbar (fullscreen
         // app) also drops the window out of the topmost band, so it never covers games.
         if (GetWindow(taskbar, GW_HWNDNEXT) != hwnd_ || !visible) SetWindowPos(hwnd_, taskbar, 0, 0, 0, 0, flags);
-        return;
+        return GetWindow(taskbar, GW_HWNDNEXT) == hwnd_;
     }
     // Directly above the taskbar: insert after whatever is above it. That keeps
     // Start, flyouts and fullscreen apps above the border, not below it.
     HWND above = GetWindow(taskbar, GW_HWNDPREV);
-    if (above == hwnd_ && visible) return;
+    if (above == hwnd_ && visible) return true;
     if (above == hwnd_) above = GetWindow(hwnd_, GW_HWNDPREV);
     if (!above) above = (GetWindowLongW(taskbar, GWL_EXSTYLE) & WS_EX_TOPMOST) ? HWND_TOPMOST : HWND_TOP;
     SetWindowPos(hwnd_, above, 0, 0, 0, 0, flags);
+    return GetWindow(taskbar, GW_HWNDPREV) == hwnd_;
 }
 
 void Backdrop::Render(const RECT& windowRect, const std::vector<RECT>& shapes, int radius, const Config& config, UINT dpi) {

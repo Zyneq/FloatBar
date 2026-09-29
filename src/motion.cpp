@@ -27,19 +27,14 @@ constexpr double kMaxTransitionMs = 2000;
 // cut an icon by trailing, so it smooths out readings that lag and then jump.
 constexpr double kCatchUpMs = 12;
 constexpr double kShrinkCatchUpMs = 24;
-// The icons either side of the Start gap have 11 px of button margin; the gap
-// takes 4 of them on each side, leaving 7 px of play for its readings' lag.
-constexpr int kSplitLeadLogicalPx = 4;
 
 bool Structural(const Islands& a, const Islands& b) {
-    return a.appCount != b.appCount || a.trayCount != b.trayCount || a.hasTray != b.hasTray || a.hasSplit != b.hasSplit ||
-           a.extras.size() != b.extras.size();
+    return a.appCount != b.appCount || a.trayCount != b.trayCount || a.hasTray != b.hasTray || a.extras.size() != b.extras.size();
 }
 
 bool SameReading(const Islands& a, const Islands& b) {
     if (a.app.left != b.app.left || a.app.right != b.app.right) return false;
     if (a.hasTray && (a.tray.left != b.tray.left || a.tray.right != b.tray.right)) return false;
-    if (a.hasSplit && a.split != b.split) return false;
     for (size_t i = 0; i < a.extras.size() && i < b.extras.size(); ++i) {
         if (!EqualRect(&a.extras[i], &b.extras[i])) return false;
     }
@@ -69,7 +64,7 @@ double NowMs() {
 
 // ------------------------------------------------------------------ ReadingFilter
 
-bool ReadingFilter::Step(Edge& e, LONG r, Grow grow, bool restart, bool plausible) const {
+bool ReadingFilter::Step(Edge& e, LONG r, int out, bool restart, bool plausible) const {
     // Taken while buttons were being rebuilt: some are missing and others can be
     // anywhere (even at their final slots long before they get there).
     if (!plausible) return false;
@@ -88,31 +83,23 @@ bool ReadingFilter::Step(Edge& e, LONG r, Grow grow, bool restart, bool plausibl
     // button set is a new final layout, never a step of a slide.
     const bool sliding =
         dir != 0 && (continuous || (!restart && e.value == e.prev && dir == e.dir && std::abs(r - e.prev) <= 4 * continuity_));
-    if (grow == Grow::None) {
-        if (r != e.value && continuous) {
-            e.value = r;
-            tracked = true;
-        }
-    } else {
-        const int out = grow == Grow::Left ? -1 : 1;  // the way that adds room
-        auto inside = [&](LONG v) { return e.finalKnown && (v - e.final) * out < 0; };
-        // The neighbour of a removed button sliding from its old slot (inside
-        // the final layout) back out towards it. The final layout alone can
-        // arrive in steps that also land inside it, but never moves outward.
-        const bool neighbourSlides = inside(r) && inside(e.prev) && dir == out && std::abs(r - e.prev) <= continuity_;
-        if ((r - e.value) * out > 0) {
-            e.value = r;  // more room never cuts an icon
-            tracked = sliding;
-        } else if (r != e.value && sliding) {
-            // Follow the slide, but not past the final layout.
-            const LONG v = !e.finalKnown ? r : grow == Grow::Left ? std::min(r, e.final) : std::max(r, e.final);
-            tracked = v != e.value;
-            e.value = v;
-        } else if (neighbourSlides && e.value != e.final) {
-            // The edge's own button is gone (its icon vanishes before the
-            // slide starts) and nothing is drawn beyond the final layout again.
-            e.value = e.final;
-        }
+    auto inside = [&](LONG v) { return e.finalKnown && (v - e.final) * out < 0; };
+    // The neighbour of a removed button sliding from its old slot (inside the
+    // final layout) back out towards it. The final layout alone can arrive in
+    // steps that also land inside it, but never moves outward.
+    const bool neighbourSlides = inside(r) && inside(e.prev) && dir == out && std::abs(r - e.prev) <= continuity_;
+    if ((r - e.value) * out > 0) {
+        e.value = r;  // more room never cuts an icon
+        tracked = sliding;
+    } else if (r != e.value && sliding) {
+        // Follow the slide, but not past the final layout.
+        const LONG v = inside(r) ? e.final : r;
+        tracked = v != e.value;
+        e.value = v;
+    } else if (neighbourSlides && e.value != e.final) {
+        // The edge's own button is gone (its icon vanishes before the slide
+        // starts) and nothing is drawn beyond the final layout again.
+        e.value = e.final;
     }
     if (dir) e.dir = dir;
     e.prev = r;
@@ -128,15 +115,11 @@ void ReadingFilter::InitAll(const Islands& fresh, LONG centre2) {
     Init(appRight_, fresh.app.right);
     Init(trayLeft_, fresh.tray.left);
     Init(trayRight_, fresh.tray.right);
-    Init(split_, fresh.split);
     trusted_ = fresh;
     transition_ = false;
     const LONG sum = fresh.app.left + fresh.app.right;
     mirror_ = std::abs(sum - centre2) <= 2 ? sum : 0;
-    settledLeft_ = fresh.app.left;
     settledRight_ = fresh.app.right;
-    settledSplit_ = fresh.split;
-    splitArmed_ = false;
 }
 
 Islands ReadingFilter::Apply(const Islands& fresh, UINT dpi, double now, LONG centre2) {
@@ -160,7 +143,7 @@ Islands ReadingFilter::Apply(const Islands& fresh, UINT dpi, double now, LONG ce
         // Positions that change without the button set changing (a slide
         // continuing after a transition ended, a label resizing) say nothing
         // about the final layout.
-        for (Edge* e : {&appLeft_, &appRight_, &trayLeft_, &trayRight_, &split_}) e->finalKnown = false;
+        for (Edge* e : {&appLeft_, &appRight_, &trayLeft_, &trayRight_}) e->finalKnown = false;
     }
     // The first plausible reading after the button set changed is the final layout.
     const bool restart = plausible && Structural(fresh, trusted_);
@@ -168,8 +151,8 @@ Islands ReadingFilter::Apply(const Islands& fresh, UINT dpi, double now, LONG ce
     if (changed) lastChange_ = now;
 
     const bool startRushes = plausible && appLeft_.prev - fresh.app.left > continuity_;  // Start sliding left fast
-    tracked_.appLeft = Step(appLeft_, fresh.app.left, Grow::Left, restart, plausible);
-    tracked_.appRight = Step(appRight_, fresh.app.right, Grow::Right, restart, plausible);
+    tracked_.appLeft = Step(appLeft_, fresh.app.left, -1, restart, plausible);
+    tracked_.appRight = Step(appRight_, fresh.app.right, 1, restart, plausible);
     // A centred taskbar stays centred: once the right edge has grown to where
     // the last button ends up, Start's slide will end at its mirror image, and
     // the left edge makes that room ahead of it (at once when Start moves fast,
@@ -190,28 +173,17 @@ Islands ReadingFilter::Apply(const Islands& fresh, UINT dpi, double now, LONG ce
         }
     }
     if (fresh.hasTray && trusted_.hasTray) {
-        tracked_.trayLeft = Step(trayLeft_, fresh.tray.left, Grow::Left, restart, plausible);
-        tracked_.trayRight = Step(trayRight_, fresh.tray.right, Grow::Right, restart, plausible);
+        tracked_.trayLeft = Step(trayLeft_, fresh.tray.left, -1, restart, plausible);
+        tracked_.trayRight = Step(trayRight_, fresh.tray.right, 1, restart, plausible);
     } else if (plausible) {
         Init(trayLeft_, fresh.tray.left);
         Init(trayRight_, fresh.tray.right);
-    }
-    if (fresh.hasSplit && trusted_.hasSplit) {
-        const LONG before = split_.prev;
-        tracked_.split = Step(split_, fresh.split, Grow::None, restart, plausible);
-        // Its reading jumps to the final layout, then back to where it was just
-        // before the icons start to slide.
-        if (restart) splitArmed_ = false;
-        if (plausible && std::abs(fresh.split - settledSplit_) <= 2 && std::abs(before - settledSplit_) > 2) splitArmed_ = true;
-    } else if (plausible) {
-        Init(split_, fresh.split);
     }
     if (plausible) trusted_ = fresh;
 
     if (transition_) {
         const bool caughtUp = appLeft_.value == fresh.app.left && appRight_.value == fresh.app.right &&
-                              (!fresh.hasTray || (trayLeft_.value == fresh.tray.left && trayRight_.value == fresh.tray.right)) &&
-                              (!fresh.hasSplit || split_.value == fresh.split);
+                              (!fresh.hasTray || (trayLeft_.value == fresh.tray.left && trayRight_.value == fresh.tray.right));
         const double quiet = now - lastChange_;
         const bool believable = plausible || quiet >= kDoubtfulStableMs;
         const bool held = now - lastRestart_ >= kMinHoldMs;
@@ -228,19 +200,6 @@ Islands ReadingFilter::Apply(const Islands& fresh, UINT dpi, double now, LONG ce
     if (out.hasTray) {
         out.tray.left = trayLeft_.value;
         out.tray.right = trayRight_.value;
-    }
-    if (out.hasSplit) {
-        // Icons sit close on both sides of the split, and while it slides its
-        // readings trail the icons by a few pixels: lead it towards the final
-        // layout a little (not before the slide starts).
-        const LONG lead = MulDiv(kSplitLeadLogicalPx, static_cast<int>(dpi ? dpi : 96), 96);
-        const bool sliding = transition_ && (splitArmed_ || std::abs(split_.value - settledSplit_) > 2);
-        // Where it ends up: its first reading after the change, unless that was
-        // missed; then Start's final position plus the (unchanging) width of the
-        // buttons before the first app.
-        const LONG final = split_.finalKnown && std::abs(split_.final - settledSplit_) > 2 ? split_.final
-                                                                                         : appLeft_.value + (settledSplit_ - settledLeft_);
-        out.split = split_.value + (sliding ? std::clamp(final - split_.value, -lead, lead) : 0);
     }
     return out;
 }

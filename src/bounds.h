@@ -15,9 +15,7 @@ namespace fb {
 struct Islands {
     RECT app{};                 // the button cluster that holds Start
     int appCount = 0;
-    bool hasSplit = false;      // system buttons (Start, Search, ...) precede the app buttons
-    LONG split = 0;             // x where the first app button begins
-    std::vector<RECT> extras;   // other app-side clusters, e.g. Widgets when centered
+    std::vector<RECT> extras;  // other app-side clusters, e.g. Widgets when centered
     bool hasTray = false;
     RECT tray{};
     int trayCount = 0;
