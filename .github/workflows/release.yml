@@ -53,9 +53,10 @@ jobs:
           Copy-Item dist/*, README.md, LICENSE stage/
           Compress-Archive -Path stage/* -DestinationPath "dist/IslandBar-$v-win-x64.zip"
           Push-Location dist
-          Get-ChildItem -File | Sort-Object Name | ForEach-Object {
-            "{0}  {1}" -f (Get-FileHash $_.Name -Algorithm SHA256).Hash.ToLower(), $_.Name
-          } | Out-File -Encoding ascii SHA256SUMS.txt
+          # List first: Out-File creates SHA256SUMS.txt before a pipeline would finish enumerating.
+          $files = Get-ChildItem -File | Sort-Object Name
+          $sums = foreach ($f in $files) { "{0}  {1}" -f (Get-FileHash $f.Name -Algorithm SHA256).Hash.ToLower(), $f.Name }
+          $sums | Out-File -Encoding ascii SHA256SUMS.txt
           Get-Content SHA256SUMS.txt
           Pop-Location
 
