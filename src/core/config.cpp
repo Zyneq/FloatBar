@@ -40,6 +40,7 @@ unsigned long ParseHex(const std::string& s, unsigned long fallback) {
 }
 
 constexpr const char* kBackgroundNames[] = {"default", "solid", "gradient"};
+constexpr const char* kMonitorModeNames[] = {"default", "normal", "hidden"};
 constexpr const char* kDirectionNames[] = {"horizontal", "vertical", "diagonalDown", "diagonalUp"};
 
 template <typename Enum, size_t N>
@@ -110,6 +111,15 @@ bool LoadConfig(Config& out, std::wstring& error) {
         c.fillOnMaximise = j.value("fillOnMaximise", c.fillOnMaximise);
         c.fillOnTaskSwitch = j.value("fillOnTaskSwitch", c.fillOnTaskSwitch);
         c.autoHide = j.value("autoHide", c.autoHide);
+        c.hideOverFullscreen = j.value("hideOverFullscreen", c.hideOverFullscreen);
+        c.hideShowDesktop = j.value("hideShowDesktop", c.hideShowDesktop);
+        if (j.contains("monitorModes") && j["monitorModes"].is_object()) {
+            for (const auto& [device, mode] : j["monitorModes"].items()) {
+                if (!mode.is_string()) continue;
+                const MonitorMode m = ParseEnum(mode.get<std::string>(), kMonitorModeNames, MonitorMode::Default);
+                if (m != MonitorMode::Default) c.monitorModes[FromUtf8(device)] = m;
+            }
+        }
         c.pollIntervalMs = j.value("pollIntervalMs", c.pollIntervalMs);
         c.background = ParseEnum(j.value("background", std::string()), kBackgroundNames, c.background);
         c.color1 = ParseHex(j.value("color1", std::string()), c.color1);
@@ -130,6 +140,8 @@ bool LoadConfig(Config& out, std::wstring& error) {
 }
 
 bool SaveConfig(const Config& c) {
+    nlohmann::ordered_json monitors = nlohmann::ordered_json::object();
+    for (const auto& [device, mode] : c.monitorModes) monitors[Utf8(device)] = kMonitorModeNames[static_cast<int>(mode)];
     const nlohmann::ordered_json j = {
         {"enabled", c.enabled},
         {"mode", ToString(c.mode)},
@@ -142,6 +154,9 @@ bool SaveConfig(const Config& c) {
         {"fillOnMaximise", c.fillOnMaximise},
         {"fillOnTaskSwitch", c.fillOnTaskSwitch},
         {"autoHide", c.autoHide},
+        {"hideOverFullscreen", c.hideOverFullscreen},
+        {"hideShowDesktop", c.hideShowDesktop},
+        {"monitorModes", monitors},
         {"pollIntervalMs", c.pollIntervalMs},
         {"background", kBackgroundNames[static_cast<int>(c.background)]},
         {"color1", ToHex(c.color1)},

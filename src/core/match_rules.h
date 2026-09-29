@@ -39,8 +39,9 @@ inline constexpr int kClusterGapLogicalPx = 16;
 // ---- Tray ----------------------------------------------------------------
 inline constexpr wchar_t kTrayButtonAutomationId[] = L"SystemTrayIcon";
 inline constexpr std::wstring_view kTrayClassPrefix = L"SystemTray.";
+inline constexpr wchar_t kShowDesktopClass[] = L"SystemTray.ShowDesktopButton";
 inline constexpr std::wstring_view kTrayExcludedClasses[] = {
-    L"SystemTray.ShowDesktopButton",
+    kShowDesktopClass,
 };
 
 inline bool IsTrayIslandMember(const std::wstring& cls) {
@@ -55,6 +56,11 @@ inline bool IsTrayIslandMember(const std::wstring& cls) {
 // Windows 11 Alt+Tab and Task View.
 inline constexpr std::wstring_view kTaskSwitcherClasses[] = {
     L"XamlExplorerHostIslandWindow",
+};
+
+// Windows that cover a whole monitor without being a "fullscreen app".
+inline constexpr std::wstring_view kDesktopClasses[] = {
+    L"Progman", L"WorkerW", L"Shell_TrayWnd", L"Shell_SecondaryTrayWnd",
 };
 
 // explorer.exe windows that are *not* shell UI (File Explorer, the desktop).

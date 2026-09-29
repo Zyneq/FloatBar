@@ -15,6 +15,14 @@
 
 namespace ib {
 
+// Stable-enough monitor identity for per-monitor settings, e.g. \\.\DISPLAY2.
+std::wstring MonitorKey(HMONITOR monitor);
+
+struct MonitorEntry {
+    std::wstring key;    // MonitorKey()
+    std::wstring label;  // "Main taskbar (1920×1080)"
+};
+
 // Owns the taskbar list, the WinEvent hooks and the applied regions.
 // Everything runs on the main (UI) thread.
 class Engine {
@@ -47,6 +55,7 @@ public:
 
     void ClearAll();
     std::wstring Status() const;
+    std::vector<MonitorEntry> Monitors() const;
 
 private:
     using Key = std::vector<LONG>;
@@ -69,6 +78,7 @@ private:
         bool shellUi = false;     // Start, search, a flyout or the taskbar itself is focused
         bool taskSwitch = false;  // Alt+Tab or Task View is open
         std::vector<HMONITOR> maximised;
+        std::vector<HMONITOR> fullscreen;
         std::wstring foregroundClass;  // for verbose logging only
     };
 

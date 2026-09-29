@@ -26,6 +26,8 @@ enum ControlId : int {
     kIdFillMaximise,
     kIdFillTaskSwitch,
     kIdAutoHide,
+    kIdHideFullscreen,
+    kIdHideShowDesktop,
     kIdAutostart,
     kIdDebugLogging,
     // Shape column
@@ -38,6 +40,11 @@ enum ControlId : int {
     kIdBottom,
     kIdPaddingLabel,
     kIdPadding,
+    kIdSecMonitors,
+    kIdMonitorLabel,
+    kIdMonitor,
+    kIdMonitorModeLabel,
+    kIdMonitorMode,
     // Appearance column
     kIdSecAppearance,
     kIdBackgroundLabel,
@@ -98,6 +105,8 @@ const Check kChecks[] = {
     {kIdFillMaximise, &Config::fillOnMaximise},
     {kIdFillTaskSwitch, &Config::fillOnTaskSwitch},
     {kIdAutoHide, &Config::autoHide},
+    {kIdHideFullscreen, &Config::hideOverFullscreen},
+    {kIdHideShowDesktop, &Config::hideShowDesktop},
 };
 
 struct Swatch {
@@ -117,11 +126,13 @@ HFONT g_font = nullptr;
 HFONT g_sectionFont = nullptr;
 HFONT g_headerFont = nullptr;
 COLORREF g_customColors[16] = {};
+std::vector<std::wstring> g_monitorKeys;  // parallel to the monitor combo
 
 HWND Item(int id) { return GetDlgItem(g_wnd, id); }
 
 bool IsSection(int id) {
-    return id == kIdSecLayout || id == kIdSecBehaviour || id == kIdSecShape || id == kIdSecAppearance || id == kIdSecStatus;
+    return id == kIdSecLayout || id == kIdSecBehaviour || id == kIdSecShape || id == kIdSecMonitors || id == kIdSecAppearance ||
+           id == kIdSecStatus;
 }
 
 bool IsGrayText(int id) { return id == kIdStatus || id == kIdHint || id == kIdAppearanceNote; }
@@ -199,17 +210,23 @@ SIZE Layout(UINT dpi) {
     y += S(38);
     place(kIdSecBehaviour, x1, y, col, S(20));
     y += S(26);
-    for (int id : {kIdFillMaximise, kIdFillTaskSwitch, kIdAutoHide, kIdAutostart, kIdDebugLogging}) {
+    for (int id : {kIdFillMaximise, kIdFillTaskSwitch, kIdAutoHide, kIdHideFullscreen, kIdHideShowDesktop, kIdAutostart,
+                   kIdDebugLogging}) {
         place(id, x1, y, col, S(24));
         y += S(28);
     }
     int bottom = y;
 
-    // Column 2: shape.
+    // Column 2: shape + per-monitor.
     y = top;
     place(kIdSecShape, x2, y, col, S(20));
     y += S(26);
     for (int id : {kIdRadius, kIdTop, kIdBottom, kIdPadding}) slider(id, x2, y, col);
+    y += S(4);
+    place(kIdSecMonitors, x2, y, col, S(20));
+    y += S(26);
+    comboRow(kIdMonitorLabel, kIdMonitor, x2, y, col);
+    comboRow(kIdMonitorModeLabel, kIdMonitorMode, x2, y, col);
     bottom = std::max(bottom, y);
 
     // Column 3: appearance.
@@ -321,11 +338,19 @@ void CreateControls() {
     AddControl(WC_BUTTONW, L"Extend taskbar when a window is maximised", check, kIdFillMaximise);
     AddControl(WC_BUTTONW, L"Extend taskbar during Alt+Tab / Task View", check, kIdFillTaskSwitch);
     AddControl(WC_BUTTONW, L"Auto-hide (reveal on mouse over)", check, kIdAutoHide);
+    AddControl(WC_BUTTONW, L"Hide taskbar over fullscreen apps", check, kIdHideFullscreen);
+    AddControl(WC_BUTTONW, L"Hide the Show Desktop sliver", check, kIdHideShowDesktop);
     AddControl(WC_BUTTONW, L"Start with Windows", check, kIdAutostart);
     AddControl(WC_BUTTONW, L"Verbose debug logging", check, kIdDebugLogging);
 
     AddControl(WC_STATICW, L"Shape", SS_LEFT, kIdSecShape);
     for (int id : {kIdRadius, kIdTop, kIdBottom, kIdPadding}) AddSlider(id);
+
+    AddControl(WC_STATICW, L"Monitors", SS_LEFT, kIdSecMonitors);
+    AddControl(WC_STATICW, L"Monitor", SS_LEFT, kIdMonitorLabel);
+    AddCombo(kIdMonitor, {});
+    AddControl(WC_STATICW, L"Taskbar", SS_LEFT, kIdMonitorModeLabel);
+    AddCombo(kIdMonitorMode, {L"Use settings above", L"Normal Windows taskbar", L"Hidden"});
 
     AddControl(WC_STATICW, L"Appearance", SS_LEFT, kIdSecAppearance);
     AddControl(WC_STATICW, L"Background", SS_LEFT, kIdBackgroundLabel);
@@ -361,7 +386,8 @@ void UpdateEnabledStates(const Config& c) {
     const bool custom = on && c.background != Background::Default;
     const bool gradient = custom && c.background == Background::Gradient;
     const bool border = custom && c.borderWidth > 0;
-    for (int id : {kIdMode, kIdFillMaximise, kIdFillTaskSwitch, kIdAutoHide, kIdRadius, kIdTop, kIdBottom, kIdPadding, kIdBackground})
+    for (int id : {kIdMode, kIdFillMaximise, kIdFillTaskSwitch, kIdAutoHide, kIdHideFullscreen, kIdHideShowDesktop, kIdRadius, kIdTop,
+                   kIdBottom, kIdPadding, kIdBackground, kIdMonitor, kIdMonitorMode})
         EnableWindow(Item(id), on);
     for (int id : {kIdTray, kIdWidgets}) EnableWindow(Item(id), islands);
     for (int id : {kIdColor1, kIdOpacity, kIdBorderWidth}) EnableWindow(Item(id), custom);
@@ -385,6 +411,42 @@ void ApplyFromControls(Config c) {
 }
 
 void ApplyFromControls() { ApplyFromControls(g_host.getConfig()); }
+
+int SelectedMonitor() {
+    const int index = ComboBox_GetCurSel(Item(kIdMonitor));
+    return index >= 0 && index < static_cast<int>(g_monitorKeys.size()) ? index : -1;
+}
+
+void ShowSelectedMonitorMode() {
+    const int index = SelectedMonitor();
+    const Config c = g_host.getConfig();
+    const auto it = index < 0 ? c.monitorModes.end() : c.monitorModes.find(g_monitorKeys[index]);
+    ComboBox_SetCurSel(Item(kIdMonitorMode), it == c.monitorModes.end() ? 0 : static_cast<int>(it->second));
+}
+
+void PopulateMonitors() {
+    const int previous = std::max(0, ComboBox_GetCurSel(Item(kIdMonitor)));
+    HWND combo = Item(kIdMonitor);
+    ComboBox_ResetContent(combo);
+    g_monitorKeys.clear();
+    for (const auto& [key, label] : g_host.getMonitors()) {
+        g_monitorKeys.push_back(key);
+        ComboBox_AddString(combo, label.c_str());
+    }
+    if (!g_monitorKeys.empty()) ComboBox_SetCurSel(combo, std::min(previous, static_cast<int>(g_monitorKeys.size()) - 1));
+    ShowSelectedMonitorMode();
+}
+
+void ApplyMonitorMode() {
+    const int index = SelectedMonitor();
+    if (index < 0) return;
+    Config c = g_host.getConfig();
+    const auto mode = static_cast<MonitorMode>(std::max(0, ComboBox_GetCurSel(Item(kIdMonitorMode))));
+    if (mode == MonitorMode::Default) c.monitorModes.erase(g_monitorKeys[index]);
+    else c.monitorModes[g_monitorKeys[index]] = mode;
+    g_host.setConfig(c);
+    RefreshStatus();
+}
 
 void PickColor(const Swatch& sw) {
     Config c = g_host.getConfig();
@@ -457,6 +519,12 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 case kIdBackground:
                 case kIdDirection:
                     if (code == CBN_SELCHANGE) ApplyFromControls();
+                    return 0;
+                case kIdMonitor:
+                    if (code == CBN_SELCHANGE) ShowSelectedMonitorMode();
+                    return 0;
+                case kIdMonitorMode:
+                    if (code == CBN_SELCHANGE) ApplyMonitorMode();
                     return 0;
                 case kIdAutostart:
                     if (code == BN_CLICKED) g_host.setAutostart(Button_GetCheck(Item(kIdAutostart)) == BST_CHECKED);
@@ -575,6 +643,7 @@ void RefreshControls() {
         SetSliderLabel(s, c.*s.field);
     }
     for (const Swatch& sw : kSwatches) InvalidateRect(Item(sw.id), nullptr, TRUE);
+    PopulateMonitors();
     UpdateEnabledStates(c);
     RefreshStatus();
 }

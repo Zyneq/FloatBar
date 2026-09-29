@@ -64,6 +64,14 @@ bool ApplySpans(HWND taskbar, const RECT& windowRect, const std::vector<RECT>& s
     return SetRegion(taskbar, region);
 }
 
+bool ApplyFullExcept(HWND taskbar, const RECT& windowRect, const RECT& exclude) {
+    HRGN region = CreateRectRgn(0, 0, windowRect.right - windowRect.left, windowRect.bottom - windowRect.top);
+    HRGN hole = CreateRectRgn(exclude.left - windowRect.left, 0, exclude.right - windowRect.left, windowRect.bottom - windowRect.top);
+    if (region && hole) CombineRgn(region, region, hole, RGN_DIFF);
+    if (hole) DeleteObject(hole);
+    return region && SetRegion(taskbar, region);
+}
+
 bool HideTaskbar(HWND taskbar) {
     HRGN empty = CreateRectRgn(0, 0, 0, 0);
     return empty && SetRegion(taskbar, empty);

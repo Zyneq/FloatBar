@@ -61,6 +61,7 @@ HICON g_smallIcon = nullptr;
 HICON g_largeIcon = nullptr;
 bool g_debouncePending = false;
 bool g_pendingBounds = false;  // a pending update must re-read button bounds
+bool g_hotkeyRegistered = false;
 ib::Config g_config;
 ib::Engine* g_engine = nullptr;  // lives in wWinMain so it is released before CoUninitialize
 
@@ -103,6 +104,7 @@ void RunUpdate(bool force, bool readBounds = true) {
         ib::log::Write(L"taskbar set changed, reattaching");
         g_engine->Attach();
         force = readBounds = true;
+        ib::settings::RefreshControls();  // the monitor list may have changed
     }
     if (g_engine->Update(force, readBounds)) ScheduleUpdate(true, kRetryMs);
     ib::settings::RefreshStatus();
@@ -156,7 +158,16 @@ void ShowSettings() {
     host.setAutostart = SetAutostart;
     host.openConfigFolder = OpenConfigFolder;
     host.createDebugReport = CreateDebugReport;
-    host.getStatus = [] { return g_engine->Status(); };
+    host.getStatus = [] {
+        std::wstring status = g_engine->Status();
+        if (!g_hotkeyRegistered) status += L"\r\nWin+F2 is already used by another program, so the hotkey is unavailable.";
+        return status;
+    };
+    host.getMonitors = [] {
+        std::vector<std::pair<std::wstring, std::wstring>> list;
+        for (const ib::MonitorEntry& m : g_engine->Monitors()) list.emplace_back(m.key, m.label);
+        return list;
+    };
     host.exitApp = [] { DestroyWindow(g_mainWnd); };
     ib::settings::Show(g_instance, host, g_smallIcon, g_largeIcon);
 }
@@ -399,7 +410,8 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
         MessageBoxW(nullptr, L"Could not initialize UI Automation.", L"IslandBar", MB_ICONERROR);
         return 1;
     }
-    if (!RegisterHotKey(g_mainWnd, kHotkeyToggleTray, MOD_WIN | MOD_NOREPEAT, VK_F2)) {
+    g_hotkeyRegistered = RegisterHotKey(g_mainWnd, kHotkeyToggleTray, MOD_WIN | MOD_NOREPEAT, VK_F2) != FALSE;
+    if (!g_hotkeyRegistered) {
         ib::log::Write(L"Win+F2 hotkey unavailable (%lu)", GetLastError());
     }
 

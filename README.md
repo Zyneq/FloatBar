@@ -35,6 +35,9 @@ It doesn't replace or patch the taskbar. It reads where the real buttons are and
 | **Extend when maximised** | While a maximised window is on a monitor, that monitor's taskbar returns to full width. |
 | **Extend during Alt+Tab / Task View** | Full width while switching windows. |
 | **Auto-hide** | The taskbar disappears until the mouse reaches it, or until Start, search or a tray flyout opens. |
+| **Hide over fullscreen apps** | Fixes the long-standing issue of the taskbar staying on top of borderless or fullscreen games and videos. |
+| **Per-monitor mode** | For each monitor: use the settings, keep the normal Windows taskbar, or hide the taskbar completely. |
+| **Hide the Show Desktop sliver** | Also removes the thin strip at the far edge in full-width and single-bar modes. |
 | **Custom background** | Solid colour or gradient (4 directions), opacity, border width, colour and opacity, all drawn with antialiased corners. Needs [TranslucentTB](#custom-colours-gradients-and-smooth-corners). |
 | **Multi-monitor** | Every taskbar is handled separately; secondary taskbars get an app island and a clock island when the clock is shown there. |
 | **Per-monitor DPI** | All sizes are in logical pixels and scaled for each monitor. |
@@ -106,6 +109,9 @@ Settings are stored in `%APPDATA%\IslandBar\config.json`. You can edit the file 
 | Extend when maximised | `fillOnMaximise` | `true` / `false` (`false`) | Per monitor. |
 | Extend during Alt+Tab | `fillOnTaskSwitch` | `true` / `false` (`false`) | |
 | Auto-hide | `autoHide` | `true` / `false` (`false`) | Use this instead of Windows' own auto-hide, which IslandBar doesn't support. |
+| Hide over fullscreen apps | `hideOverFullscreen` | `true` / `false` (`true`) | Hides the taskbar while the foreground window covers the whole monitor (not the desktop, Alt+Tab or Task View). |
+| Hide the Show Desktop sliver | `hideShowDesktop` | `true` / `false` (`false`) | Islands mode never shows it. This also removes it in full-width and single-bar modes. |
+| Per-monitor mode | `monitorModes` | `{ "\\\\.\\DISPLAY2": "hidden" }` | Per monitor device: `normal` (Windows' taskbar) or `hidden`. Monitors not listed follow the settings. In Settings → Monitors, pick the monitor, then the mode. |
 | Background | `background` | `default`, `solid`, `gradient` (`default`) | See below. |
 | Colour 1 / 2 | `color1`, `color2` | `#RRGGBB` | Colour 2 is the gradient end. |
 | Direction | `gradientDirection` | `horizontal`, `vertical`, `diagonalDown`, `diagonalUp` | |

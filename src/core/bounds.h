@@ -18,6 +18,8 @@ struct Islands {
     bool hasTray = false;
     RECT tray{};
     int trayCount = 0;
+    bool hasShowDesktop = false;
+    RECT showDesktop{};         // the sliver at the far edge
 };
 
 struct BoundsResult {

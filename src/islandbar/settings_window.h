@@ -4,6 +4,8 @@
 
 #include <functional>
 #include <string>
+#include <utility>
+#include <vector>
 
 #include "core/config.h"
 
@@ -18,6 +20,7 @@ struct Host {
     std::function<void()> openConfigFolder;
     std::function<void()> createDebugReport;       // asks for consent itself
     std::function<std::wstring()> getStatus;
+    std::function<std::vector<std::pair<std::wstring, std::wstring>>()> getMonitors;  // {key, label}
     std::function<void()> exitApp;
 };
 

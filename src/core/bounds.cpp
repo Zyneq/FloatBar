@@ -172,9 +172,14 @@ BoundsResult BoundsReader::Compute(HWND taskbar) const {
         for (int i = 0; i < length; ++i) {
             ComPtr<IUIAutomationElement> e;
             RECT r;
-            if (FAILED(trayButtons->GetElement(i, &e)) || !e) continue;
-            if (!rules::IsTrayIslandMember(CachedString(e.Get(), &IUIAutomationElement::get_CachedClassName))) continue;
-            if (!UsableRect(e.Get(), r)) continue;
+            if (FAILED(trayButtons->GetElement(i, &e)) || !e || !UsableRect(e.Get(), r)) continue;
+            const std::wstring cls = CachedString(e.Get(), &IUIAutomationElement::get_CachedClassName);
+            if (cls == rules::kShowDesktopClass) {
+                islands.hasShowDesktop = true;
+                islands.showDesktop = r;
+                continue;
+            }
+            if (!rules::IsTrayIslandMember(cls)) continue;
             if (islands.trayCount++ == 0) islands.tray = r;
             else UnionRect(&islands.tray, &islands.tray, &r);
         }

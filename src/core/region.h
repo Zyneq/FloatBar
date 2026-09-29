@@ -24,6 +24,9 @@ std::vector<HWND> FindTaskbars();
 // (screen coordinates) are used; the vertical extent comes from `style`.
 bool ApplySpans(HWND taskbar, const RECT& windowRect, const std::vector<RECT>& spans, const SpanStyle& style);
 
+// Full taskbar except `exclude` (screen coordinates), e.g. the Show Desktop sliver.
+bool ApplyFullExcept(HWND taskbar, const RECT& windowRect, const RECT& exclude);
+
 // Clips the taskbar away entirely (auto-hide).
 bool HideTaskbar(HWND taskbar);
 

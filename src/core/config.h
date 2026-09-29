@@ -1,5 +1,6 @@
 #pragma once
 
+#include <map>
 #include <string>
 
 namespace ib {
@@ -23,6 +24,13 @@ enum class Background {
 
 enum class GradientDirection { Horizontal, Vertical, DiagonalDown, DiagonalUp };
 
+// Per-monitor override of the global settings.
+enum class MonitorMode {
+    Default,  // follow the global settings
+    Normal,   // leave this monitor's taskbar as Windows draws it
+    Hidden,   // hide this monitor's taskbar completely
+};
+
 // Values in logical pixels; scaled by the taskbar's DPI when applied.
 struct Config {
     bool enabled = true;
@@ -36,6 +44,9 @@ struct Config {
     bool fillOnMaximise = false;
     bool fillOnTaskSwitch = false;
     bool autoHide = false;
+    bool hideOverFullscreen = true;  // hide while a fullscreen/borderless app covers the monitor
+    bool hideShowDesktop = false;    // clip the Show Desktop sliver in full-width and bar modes too
+    std::map<std::wstring, MonitorMode> monitorModes;  // key: monitor device name, e.g. \\.\DISPLAY2
     int pollIntervalMs = 1000;
 
     // Appearance (colours are COLORREF, 0x00BBGGRR).

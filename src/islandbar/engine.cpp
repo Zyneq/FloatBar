@@ -58,6 +58,41 @@ BOOL CALLBACK CollectMaximised(HWND hwnd, LPARAM lParam) {
 
 RECT Padded(const RECT& r, int padding) { return {r.left - padding, r.top, r.right + padding, r.bottom}; }
 
+// Cuts the Show Desktop sliver off whichever end of `span` it sits at.
+RECT WithoutShowDesktop(RECT span, const Islands& is) {
+    if (!is.hasShowDesktop) return span;
+    if (is.showDesktop.left >= (span.left + span.right) / 2) span.right = std::min(span.right, is.showDesktop.left);
+    else span.left = std::max(span.left, is.showDesktop.right);
+    return span;
+}
+
+// The monitor `hwnd` covers completely, if it is a fullscreen or borderless app.
+HMONITOR FullscreenMonitor(HWND hwnd) {
+    if (!hwnd) return nullptr;
+    HWND root = GetAncestor(hwnd, GA_ROOT);
+    if (!IsWindowVisible(root) || IsIconic(root) || IsCloaked(root)) return nullptr;
+    // The desktop and Alt+Tab / Task View also cover the monitor but are not apps.
+    const std::wstring cls = WindowClass(root);
+    if (rules::InList(cls, rules::kDesktopClasses) || rules::InList(cls, rules::kTaskSwitcherClasses)) return nullptr;
+    HMONITOR monitor = MonitorFromWindow(root, MONITOR_DEFAULTTONULL);
+    MONITORINFO mi = {sizeof(mi)};
+    RECT wr;
+    if (!monitor || !GetMonitorInfoW(monitor, &mi) || !GetWindowRect(root, &wr)) return nullptr;
+    const RECT& m = mi.rcMonitor;
+    const bool covers = wr.left <= m.left && wr.top <= m.top && wr.right >= m.right && wr.bottom >= m.bottom;
+    return covers ? monitor : nullptr;
+}
+
+}  // namespace
+
+std::wstring MonitorKey(HMONITOR monitor) {
+    MONITORINFOEXW mi = {};
+    mi.cbSize = sizeof(mi);
+    return GetMonitorInfoW(monitor, &mi) ? std::wstring(mi.szDevice) : std::wstring();
+}
+
+namespace {
+
 bool IsProcessRunning(const wchar_t* exeName) {
     HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
     if (snapshot == INVALID_HANDLE_VALUE) return false;
@@ -126,7 +161,7 @@ void Engine::Detach() {
 bool Engine::NeedsGlobalHooks() const {
     // A custom background also needs foreground changes to keep its z-order under fullscreen apps.
     return config_.enabled && (config_.fillOnMaximise || config_.fillOnTaskSwitch || config_.autoHide ||
-                               config_.background != Background::Default ||
+                               config_.hideOverFullscreen || config_.background != Background::Default ||
                                (config_.mode == LayoutMode::Islands && config_.trayMode == TrayMode::Hover));
 }
 
@@ -193,7 +228,7 @@ void CALLBACK Engine::GlobalEventProc(HWINEVENTHOOK, DWORD event, HWND hwnd, LON
             // Object events: only top-level windows matter.
             if (!hwnd || idObject != OBJID_WINDOW || idChild != CHILDID_SELF) return;
             if (GetAncestor(hwnd, GA_ROOT) != hwnd || self->IsTaskbar(hwnd)) return;
-            if (event == EVENT_OBJECT_LOCATIONCHANGE && !self->config_.fillOnMaximise) return;
+            if (event == EVENT_OBJECT_LOCATIONCHANGE && !self->config_.fillOnMaximise && !self->config_.hideOverFullscreen) return;
             break;
     }
     if (self->callbacks_.windowsChanged) self->callbacks_.windowsChanged();
@@ -240,14 +275,17 @@ Engine::Context Engine::BuildContext() const {
         else if (config_.autoHide || config_.trayMode == TrayMode::Hover) ctx.shellUi = rules::InList(ProcessName(pid), rules::kShellProcesses);
     }
     if (config_.fillOnMaximise) EnumWindows(CollectMaximised, reinterpret_cast<LPARAM>(&ctx.maximised));
+    if (config_.hideOverFullscreen) {
+        if (HMONITOR m = FullscreenMonitor(GetForegroundWindow())) ctx.fullscreen.push_back(m);
+    }
     return ctx;
 }
 
 bool Engine::Update(bool force, bool readBounds) {
     if (!config_.enabled) return false;
     const Context ctx = BuildContext();
-    log::Debug(L"update force=%d bounds=%d fg=%s shellUi=%d taskSwitch=%d maximisedMonitors=%zu", force, readBounds,
-               ctx.foregroundClass.c_str(), ctx.shellUi, ctx.taskSwitch, ctx.maximised.size());
+    log::Debug(L"update force=%d bounds=%d fg=%s shellUi=%d taskSwitch=%d maximisedMonitors=%zu fullscreenMonitors=%zu", force,
+               readBounds, ctx.foregroundClass.c_str(), ctx.shellUi, ctx.taskSwitch, ctx.maximised.size(), ctx.fullscreen.size());
     bool retry = false;
     for (Taskbar& tb : taskbars_) retry |= UpdateOne(tb, force, readBounds, ctx);
     return retry;
@@ -303,23 +341,44 @@ bool Engine::UpdateOne(Taskbar& tb, bool force, bool readBounds, const Context& 
     // Decide what this taskbar should look like right now.
     const bool revealed = tb.hovered || ctx.shellUi;
     const HMONITOR monitor = MonitorFromWindow(tb.hwnd, MONITOR_DEFAULTTONEAREST);
+    auto onThisMonitor = [monitor](const std::vector<HMONITOR>& list) {
+        return std::find(list.begin(), list.end(), monitor) != list.end();
+    };
+    const auto modeIt = config_.monitorModes.find(MonitorKey(monitor));
+    const MonitorMode monitorMode = modeIt == config_.monitorModes.end() ? MonitorMode::Default : modeIt->second;
+    const bool trimShowDesktop = config_.hideShowDesktop && is.hasShowDesktop;
+
     State state = kShapes;
     std::wstring why;
-    if (config_.autoHide && !revealed) {
+    if (monitorMode == MonitorMode::Hidden) {
         state = kHidden;
+        why = L"hidden on this monitor";
+    } else if (config_.hideOverFullscreen && onThisMonitor(ctx.fullscreen)) {
+        state = kHidden;
+        why = L"fullscreen app";
+    } else if (monitorMode == MonitorMode::Normal) {
+        state = kFilled;
+        why = L"normal taskbar on this monitor";
+    } else if (config_.autoHide && !revealed) {
+        state = kHidden;
+        why = L"auto-hide";
     } else if (config_.fillOnTaskSwitch && ctx.taskSwitch) {
         state = kFilled;
         why = L"task switcher open";
-    } else if (config_.fillOnMaximise && std::find(ctx.maximised.begin(), ctx.maximised.end(), monitor) != ctx.maximised.end()) {
+    } else if (config_.fillOnMaximise && onThisMonitor(ctx.maximised)) {
         state = kFilled;
         why = L"window maximised";
     }
 
     std::vector<RECT> spans;
     bool trayShown = false;
-    if (state == kShapes) {
+    if (state == kFilled) {
+        // One full-height span; only used for the backdrop and the key.
+        spans.push_back(trimShowDesktop ? WithoutShowDesktop(wr, is) : wr);
+    } else if (state == kShapes) {
         if (config_.mode == LayoutMode::Bar) {
-            spans.push_back({wr.left + padding, wr.top, wr.right - padding, wr.bottom});
+            const RECT bar = {wr.left + padding, wr.top, wr.right - padding, wr.bottom};
+            spans.push_back(trimShowDesktop ? WithoutShowDesktop(bar, is) : bar);
         } else {
             spans.push_back(Padded(is.app, padding));
             if (config_.showWidgets) {
@@ -337,7 +396,7 @@ bool Engine::UpdateOne(Taskbar& tb, bool force, bool readBounds, const Context& 
     }
 
     switch (state) {
-        case kHidden: tb.status = L"hidden (auto-hide)"; break;
+        case kHidden: tb.status = L"hidden – " + why; break;
         case kFilled: tb.status = L"full width – " + why; break;
         default:
             if (config_.mode == LayoutMode::Bar) {
@@ -351,12 +410,16 @@ bool Engine::UpdateOne(Taskbar& tb, bool force, bool readBounds, const Context& 
 
     SyncBackdrop(tb, state, wr, spans, style, dpi);
 
-    const bool regionLost = state != kFilled && tb.applied && !HasRegion(tb.hwnd);
+    // Something else removed our region while the state stayed the same.
+    const bool regionLost = state != kFilled && tb.applied && (*tb.applied)[0] == state && !HasRegion(tb.hwnd);
     if (!force && tb.applied == key && !regionLost) return false;
 
     bool ok = true;
     switch (state) {
-        case kFilled: ClearRegion(tb.hwnd); break;
+        case kFilled:
+            if (trimShowDesktop) ok = ApplyFullExcept(tb.hwnd, wr, is.showDesktop);
+            else ClearRegion(tb.hwnd);
+            break;
         case kHidden: ok = HideTaskbar(tb.hwnd); break;
         default: ok = ApplySpans(tb.hwnd, wr, spans, style); break;
     }
@@ -390,7 +453,8 @@ void Engine::SyncBackdrop(Taskbar& tb, LONG state, const RECT& wr, const std::ve
     std::vector<RECT> shapes;
     int radius = style.radius;
     if (state == kFilled) {
-        shapes.push_back({0, 0, wr.right - wr.left, wr.bottom - wr.top});
+        const RECT full = spans.empty() ? wr : spans.front();
+        shapes.push_back({full.left - wr.left, 0, full.right - wr.left, wr.bottom - wr.top});
         radius = 0;
     } else {
         for (const RECT& span : spans) shapes.push_back(SpanToWindowRect(wr, span, style));
@@ -405,6 +469,21 @@ void Engine::ClearAll() {
         tb.backdrop.reset();
     }
     ClearAllTaskbars();
+}
+
+std::vector<MonitorEntry> Engine::Monitors() const {
+    std::vector<MonitorEntry> result;
+    int secondary = 0;
+    for (const Taskbar& tb : taskbars_) {
+        HMONITOR monitor = MonitorFromWindow(tb.hwnd, MONITOR_DEFAULTTONEAREST);
+        MONITORINFO mi = {sizeof(mi)};
+        GetMonitorInfoW(monitor, &mi);
+        const std::wstring size = std::to_wstring(mi.rcMonitor.right - mi.rcMonitor.left) + L"×" +
+                                  std::to_wstring(mi.rcMonitor.bottom - mi.rcMonitor.top);
+        const std::wstring name = tb.primary ? std::wstring(L"Main taskbar") : L"Monitor " + std::to_wstring(++secondary + 1);
+        result.push_back({MonitorKey(monitor), name + L" (" + size + L")"});
+    }
+    return result;
 }
 
 std::wstring Engine::Status() const {
