@@ -21,6 +21,7 @@ It doesn't replace or patch the taskbar. It reads where the real buttons are and
 - [Known limitations](#known-limitations)
 - [Building from source](#building-from-source)
 - [Project layout](#project-layout)
+- [Code signing policy](#code-signing-policy)
 - [License](#license)
 
 ---
@@ -40,7 +41,9 @@ It doesn't replace or patch the taskbar. It reads where the real buttons are and
 | **Hide over fullscreen apps** | Fixes the long-standing issue of the taskbar staying on top of borderless or fullscreen games and videos. |
 | **Per-monitor mode** | For each monitor: use the settings, keep the normal Windows taskbar, or hide the taskbar completely. |
 | **Hide the Show Desktop sliver** | Also removes the thin strip at the far edge in full-width and single-bar modes. |
-| **Custom background** | Solid colour or gradient (4 directions), opacity, border width, colour and opacity, all drawn with antialiased corners. Needs [TranslucentTB](#custom-colours-gradients-and-smooth-corners). |
+| **Smooth animation** | When apps open or close, the island edges glide to their new size instead of jumping. |
+| **Border** | An antialiased outline (width, colour, opacity) drawn over the taskbar edge. It also smooths the corners, and works with the normal Windows background. |
+| **Custom background** | Solid colour or gradient (5 directions, including edges → centre), with opacity, all drawn with antialiased corners. Needs [TranslucentTB](#custom-colours-gradients-and-smooth-corners). |
 | **Multi-monitor** | Every taskbar is handled separately; secondary taskbars get an app island and a clock island when the clock is shown there. |
 | **Per-monitor DPI** | All sizes are in logical pixels and scaled for each monitor. |
 | **Safe by design** | Restores the normal taskbar on exit, sign-out, crash, or when detection fails. `floatbar.exe --reset` fixes anything left behind. |
@@ -105,14 +108,15 @@ Everything is in the Settings window. Settings are saved to `%APPDATA%\FloatBar\
 | Extend when maximised | `fillOnMaximise` | `true` / `false` (`false`) | Per monitor. |
 | Extend during Alt+Tab | `fillOnTaskSwitch` | `true` / `false` (`false`) | |
 | Auto-hide | `autoHide` | `true` / `false` (`false`) | Use this instead of Windows' own auto-hide, which FloatBar doesn't support. |
+| Smooth island animation | `animate` | `true` / `false` (`true`) | Ease island edges to new positions. Off = jump immediately. |
 | Hide over fullscreen apps | `hideOverFullscreen` | `true` / `false` (`true`) | Hides the taskbar while the foreground window covers the whole monitor (not the desktop, Alt+Tab or Task View). |
 | Hide the Show Desktop sliver | `hideShowDesktop` | `true` / `false` (`false`) | Islands mode never shows it. This also removes it in full-width and single-bar modes. |
 | Per-monitor mode | `[Monitors]` section | `\\.\DISPLAY2=hidden` | Per monitor device: `normal` (Windows' taskbar) or `hidden`. Monitors not listed follow the settings. In Settings → Monitors, pick the monitor, then the mode. |
 | Background | `background` | `default`, `solid`, `gradient` (`default`) | See below. |
 | Colour 1 / 2 | `color1`, `color2` | `#RRGGBB` | Colour 2 is the gradient end. |
-| Direction | `gradientDirection` | `horizontal`, `vertical`, `diagonalDown`, `diagonalUp` | |
+| Direction | `gradientDirection` | `horizontal`, `vertical`, `diagonalDown`, `diagonalUp`, `center` | `center`: colour 1 at both ends, colour 2 in the middle (left → centre ← right). |
 | Opacity | `opacity` | 0–100 % (85) | Fill opacity. |
-| Border width | `borderWidth` | 0–4 (1) | |
+| Border width | `borderWidth` | 0–4 (0) | 0 = no border. Works without TranslucentTB. |
 | Border colour | `borderColor` | `#RRGGBB` (`#FFFFFF`) | |
 | Border opacity | `borderOpacity` | 0–100 % (15) | |
 | Verbose debug logging | `debugLogging` | `true` / `false` (`false`) | Asks for consent when enabled from Settings. |
@@ -125,13 +129,15 @@ All keys live in the `[FloatBar]` section. Missing or invalid values fall back t
 
 On Windows 11 the taskbar background (Mica/acrylic) is drawn by explorer itself, and no outside program can recolour it without injecting code into explorer. FloatBar deliberately doesn't do that. The clip it applies also can't have antialiased edges: `SetWindowRgn` is pixel-exact, so rounded corners look slightly stepped.
 
-For smooth corners and your own colours, FloatBar teams up with **[TranslucentTB](https://github.com/TranslucentTB/TranslucentTB)**:
+**Smooth corners without anything extra:** set a *Border* (Settings → Appearance, width 1–2). FloatBar draws an antialiased outline in a click-through window just above the taskbar, which covers the stepped edge.
+
+For your own background colours, FloatBar teams up with **[TranslucentTB](https://github.com/TranslucentTB/TranslucentTB)**:
 
 1. Install TranslucentTB: from the Microsoft Store, or run `winget install --id CharlesMilette.TranslucentTB`.
 2. In TranslucentTB's tray menu, set **Desktop → Clear**. Set the other states (visible window, maximised window, Start opened, …) to **Clear** too, or they'll paint over FloatBar's background in those situations.
 3. In FloatBar's Settings → **Appearance**, pick *Solid colour* or *Gradient*.
 
-FloatBar then draws the island backgrounds itself, antialiased and with per-pixel opacity, in a click-through window placed directly beneath each taskbar. The now-transparent taskbar shows them through, with its icons on top. The Settings status line warns you if a custom background is selected but TranslucentTB isn't running.
+FloatBar then draws the island backgrounds itself, antialiased and with per-pixel opacity, in a click-through window placed directly beneath each taskbar. The now-transparent taskbar shows them through, with its icons on top. While TranslucentTB isn't running, FloatBar doesn't draw the background at all (it would only peek out around the edges), and the Settings status line tells you why.
 
 ## How it works
 
@@ -191,7 +197,8 @@ To see exactly what FloatBar sees, run `floatbar.exe --dump dump.txt`. The file 
 
 ## Known limitations
 
-- The clip itself isn't antialiased (a `SetWindowRgn` limit). Use a [custom background](#custom-colours-gradients-and-smooth-corners) for smooth corners.
+- The clip itself isn't antialiased (a `SetWindowRgn` limit). A border or a [custom background](#custom-colours-gradients-and-smooth-corners) gives smooth corners.
+- Apps can't wrap onto a second row. Button layout belongs to explorer; changing it would require injecting code into explorer, which FloatBar never does. When apps don't fit, Windows' own overflow button (…) appears and gets its place in the app island.
 - Windows' own *Automatically hide the taskbar* isn't supported; use FloatBar's Auto-hide instead.
 - The taskbar can't move to the top or sides, and buttons can't be repositioned, because FloatBar only shapes what Windows draws. With left alignment, the app island touches the screen edge.
 - Tooltips, thumbnails, Start, search and flyouts are separate windows and keep their normal look.
@@ -225,7 +232,7 @@ Everything is in `src/`, one flat folder:
 | `bounds.*` | UI Automation → island rectangles, clustering, sanity checks |
 | `engine.*` | hooks, state decisions (islands / full / hidden), applying regions |
 | `region.*` | rounded regions, `SetWindowRgn`, taskbar discovery, reset |
-| `backdrop.*` | antialiased custom background window |
+| `backdrop.*` | antialiased background (below the taskbar) and border (above it) windows |
 | `settings_window.*` | the Settings window (talks to the app through `app.h`) |
 | `main.cpp` | tray icon, menu, hotkey, timers, message loop, safety nets, command line |
 | `config.*` | `config.ini` load/save |
@@ -235,12 +242,21 @@ Everything is in `src/`, one flat folder:
 
 `.github/workflows/release.yml` holds the CI build, checksums, provenance and releases.
 
+## Code signing policy
+
+Free code signing is provided by [SignPath.io](https://about.signpath.io), with a certificate by the [SignPath Foundation](https://signpath.org). *(Application pending; until it's approved, releases are unsigned but still hashed and attested as described in [Download and verify](#download-and-verify).)*
+
+- **Committers and reviewers:** [Zyneq](https://github.com/Zyneq)
+- **Approvers:** [Zyneq](https://github.com/Zyneq)
+
+Only `floatbar.exe` built by this repository's [release workflow](.github/workflows/release.yml) from a tagged commit is signed. Each signing request is approved by hand.
+
+**Privacy:** FloatBar doesn't transfer any information to any networked system unless the user explicitly asks for it. It contains no network code. The optional debug report is saved locally, and you decide whether to attach it to an issue.
+
 ## License
 
-© 2026 Zyneq. FloatBar is licensed under the **[Creative Commons Attribution 4.0 International License (CC BY 4.0)](LICENSE)**.
+FloatBar is released under the **[MIT License](LICENSE)**, © 2026 Zyneq.
 
-You may use, share, modify and redistribute it, including commercially, as long as you **give appropriate credit**: name the author and link to this repository and the license, and indicate whether you made changes. For example:
-
-> Based on [FloatBar](https://github.com/Zyneq/FloatBar) by Zyneq, licensed under [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/).
+You may use, copy, modify and redistribute it, including commercially. The one condition: **keep the copyright notice and license text** with any copy or substantial part of it, which credits the author.
 
 Inspired by [RoundedTB](https://github.com/RoundedTB/RoundedTB); no code is shared with it.

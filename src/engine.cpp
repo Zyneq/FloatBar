@@ -58,6 +58,30 @@ BOOL CALLBACK CollectMaximised(HWND hwnd, LPARAM lParam) {
 
 RECT Padded(const RECT& r, int padding) { return {r.left - padding, r.top, r.right + padding, r.bottom}; }
 
+// Spans only differ horizontally; their height comes from the style.
+bool SameSpans(const std::vector<RECT>& a, const std::vector<RECT>& b) {
+    if (a.size() != b.size()) return false;
+    for (size_t i = 0; i < a.size(); ++i) {
+        if (a[i].left != b[i].left || a[i].right != b[i].right) return false;
+    }
+    return true;
+}
+
+// One animation frame of ease-out: cover a fixed share of the remaining
+// distance, so edges move fast at first and settle gently (~120 ms at 60 fps).
+constexpr float kEaseShare = 0.3f;
+
+void Approach(LONG& current, LONG target) {
+    const LONG diff = target - current;
+    if (diff >= -1 && diff <= 1) {
+        current = target;
+        return;
+    }
+    LONG step = static_cast<LONG>(diff * kEaseShare);
+    if (step == 0) step = diff > 0 ? 1 : -1;
+    current += step;
+}
+
 // Cuts the Show Desktop sliver off whichever end of `span` it sits at.
 RECT WithoutShowDesktop(RECT span, const Islands& is) {
     if (!is.hasShowDesktop) return span;
@@ -144,8 +168,9 @@ void Engine::Attach() {
     if (!hwnds.empty()) GetWindowThreadProcessId(hwnds.front(), &explorerPid_);
     if (explorerPid_) {
         const DWORD flags = WINEVENT_OUTOFCONTEXT | WINEVENT_SKIPOWNPROCESS;
-        // EVENT_OBJECT_CREATE..EVENT_OBJECT_HIDE covers CREATE, DESTROY, SHOW and HIDE.
-        if (HWINEVENTHOOK h = SetWinEventHook(EVENT_OBJECT_CREATE, EVENT_OBJECT_HIDE, nullptr, ExplorerEventProc, explorerPid_, 0, flags))
+        // EVENT_OBJECT_CREATE..EVENT_OBJECT_REORDER covers CREATE, DESTROY, SHOW, HIDE and
+        // REORDER (the taskbar re-raising itself, which must re-stack the border above it).
+        if (HWINEVENTHOOK h = SetWinEventHook(EVENT_OBJECT_CREATE, EVENT_OBJECT_REORDER, nullptr, ExplorerEventProc, explorerPid_, 0, flags))
             explorerHooks_.push_back(h);
         if (HWINEVENTHOOK h = SetWinEventHook(EVENT_OBJECT_LOCATIONCHANGE, EVENT_OBJECT_LOCATIONCHANGE, nullptr, ExplorerEventProc, explorerPid_, 0, flags))
             explorerHooks_.push_back(h);
@@ -159,9 +184,10 @@ void Engine::Detach() {
 }
 
 bool Engine::NeedsGlobalHooks() const {
-    // A custom background also needs foreground changes to keep its z-order under fullscreen apps.
+    // Background and border layers also need foreground changes to keep their z-order
+    // next to the taskbar (and out of the way of fullscreen apps).
     return config_.enabled && (config_.fillOnMaximise || config_.fillOnTaskSwitch || config_.autoHide ||
-                               config_.hideOverFullscreen || config_.background != Background::Default ||
+                               config_.hideOverFullscreen || config_.background != Background::Default || BorderActive() ||
                                (config_.mode == LayoutMode::Islands && config_.trayMode == TrayMode::Hover));
 }
 
@@ -318,9 +344,13 @@ bool Engine::UpdateOne(Taskbar& tb, bool force, bool readBounds, const Context& 
                 if (tb.applied) log::Write(L"%s: falling back to unclipped taskbar", label.c_str());
                 tb.applied.reset();
             }
-            RECT wr = {};
-            GetWindowRect(tb.hwnd, &wr);
-            SyncBackdrop(tb, kFilled, wr, {}, {}, GetDpiForWindow(tb.hwnd));
+            // The custom background (if any) follows the now full-width taskbar.
+            GetWindowRect(tb.hwnd, &tb.wr);
+            tb.dpi = GetDpiForWindow(tb.hwnd) ? GetDpiForWindow(tb.hwnd) : 96;
+            tb.state = kFilled;
+            tb.trimShowDesktop = false;
+            tb.shown = tb.target = {tb.wr};
+            SyncLayers(tb);
             tb.status = L"unclipped – " + result.error;
             return false;
         }
@@ -389,12 +419,6 @@ bool Engine::UpdateOne(Taskbar& tb, bool force, bool readBounds, const Context& 
         }
     }
 
-    Key key = {state, wr.left, wr.top, wr.right, wr.bottom, style.marginTop, style.marginBottom, style.radius};
-    for (const RECT& s : spans) {
-        key.push_back(s.left);
-        key.push_back(s.right);
-    }
-
     switch (state) {
         case kHidden: tb.status = L"hidden – " + why; break;
         case kFilled: tb.status = L"full width – " + why; break;
@@ -408,65 +432,129 @@ bool Engine::UpdateOne(Taskbar& tb, bool force, bool readBounds, const Context& 
             }
     }
 
-    SyncBackdrop(tb, state, wr, spans, style, dpi);
+    // Only islands in the same state animate; anything else (first frame, state
+    // change, islands appearing or disappearing, resolution change) snaps.
+    const bool stateChanged = !tb.applied || tb.state != state;
+    const bool targetChanged = stateChanged || !SameSpans(tb.target, spans);
+    const bool snap = force || stateChanged || !config_.animate || state != kShapes || tb.shown.size() != spans.size() ||
+                      !EqualRect(&tb.wr, &wr) || tb.dpi != dpi;
+    tb.state = state;
+    tb.wr = wr;
+    tb.style = style;
+    tb.dpi = dpi;
+    tb.trimShowDesktop = trimShowDesktop;
+    tb.showDesktop = is.showDesktop;
+    tb.target = std::move(spans);
+    if (snap) tb.shown = tb.target;
+    Present(tb, force);
 
-    // Something else removed our region while the state stayed the same.
-    const bool regionLost = state != kFilled && tb.applied && (*tb.applied)[0] == state && !HasRegion(tb.hwnd);
-    if (!force && tb.applied == key && !regionLost) return false;
-
-    bool ok = true;
-    switch (state) {
-        case kFilled:
-            if (trimShowDesktop) ok = ApplyFullExcept(tb.hwnd, wr, is.showDesktop);
-            else ClearRegion(tb.hwnd);
-            break;
-        case kHidden: ok = HideTaskbar(tb.hwnd); break;
-        default: ok = ApplySpans(tb.hwnd, wr, spans, style); break;
-    }
-    if (!ok) {
-        log::Write(L"%s: SetWindowRgn failed (%lu)", label.c_str(), GetLastError());
-        tb.status = L"SetWindowRgn failed";
-        return false;
-    }
-
-    const bool stateChanged = !tb.applied || (*tb.applied)[0] != state;
-    tb.applied = key;
-    if (state == kShapes) {
-        log::Write(L"%s: app=%s (%d) extras=%zu tray=%s dpi=%u%s", label.c_str(), FormatRect(is.app).c_str(), is.appCount,
-                   is.extras.size(), trayShown ? FormatRect(is.tray).c_str() : L"-", dpi, regionLost ? L" [region was reset]" : L"");
+    if (state == kShapes && targetChanged) {
+        log::Write(L"%s: app=%s (%d) extras=%zu tray=%s dpi=%u", label.c_str(), FormatRect(is.app).c_str(), is.appCount,
+                   is.extras.size(), trayShown ? FormatRect(is.tray).c_str() : L"-", dpi);
     } else if (stateChanged) {
         log::Write(L"%s: %s", label.c_str(), tb.status.c_str());
     }
     return false;
 }
 
-void Engine::SyncBackdrop(Taskbar& tb, LONG state, const RECT& wr, const std::vector<RECT>& spans, const SpanStyle& style, UINT dpi) {
-    if (config_.background == Background::Default) {
-        tb.backdrop.reset();
+void Engine::Present(Taskbar& tb, bool force) {
+    SyncLayers(tb);
+
+    Key key = {tb.state, tb.wr.left, tb.wr.top, tb.wr.right, tb.wr.bottom, tb.style.marginTop, tb.style.marginBottom, tb.style.radius,
+               tb.trimShowDesktop ? 1 : 0};
+    for (const RECT& s : tb.shown) key.insert(key.end(), {s.left, s.right});
+
+    // Something else removed our region while the state stayed the same.
+    const bool regionLost = tb.state != kFilled && tb.applied && (*tb.applied)[0] == tb.state && !HasRegion(tb.hwnd);
+    if (!force && tb.applied == key && !regionLost) return;
+
+    bool ok = true;
+    switch (tb.state) {
+        case kFilled:
+            if (tb.trimShowDesktop) ok = ApplyFullExcept(tb.hwnd, tb.wr, tb.showDesktop);
+            else ClearRegion(tb.hwnd);
+            break;
+        case kHidden: ok = HideTaskbar(tb.hwnd); break;
+        default: ok = ApplySpans(tb.hwnd, tb.wr, tb.shown, tb.style); break;
+    }
+    if (!ok) {
+        log::Write(L"%s: SetWindowRgn failed (%lu)", Label(tb.hwnd, tb.primary).c_str(), GetLastError());
+        tb.status = L"SetWindowRgn failed";
         return;
     }
-    if (!tb.backdrop) tb.backdrop = std::make_unique<Backdrop>();
-    if (state == kHidden) {
-        tb.backdrop->Hide();
-        return;
+    if (regionLost) log::Write(L"%s: region was reset by something else, reapplied", Label(tb.hwnd, tb.primary).c_str());
+    tb.applied = key;
+}
+
+bool Engine::FillVisible() {
+    // The fill sits below the taskbar, so it only shows (instead of leaving a
+    // jagged fringe around the clip) when TranslucentTB has made the taskbar clear.
+    const DWORD now = GetTickCount();
+    if (!translucentTbCheckedAt_ || now - translucentTbCheckedAt_ > 3000) {
+        translucentTbRunning_ = IsProcessRunning(L"TranslucentTB.exe");
+        translucentTbCheckedAt_ = now ? now : 1;
     }
+    return translucentTbRunning_;
+}
+
+void Engine::SyncLayers(Taskbar& tb) {
     std::vector<RECT> shapes;
-    int radius = style.radius;
-    if (state == kFilled) {
-        const RECT full = spans.empty() ? wr : spans.front();
-        shapes.push_back({full.left - wr.left, 0, full.right - wr.left, wr.bottom - wr.top});
+    int radius = tb.style.radius;
+    if (tb.state == kFilled) {
+        const RECT full = tb.shown.empty() ? tb.wr : tb.shown.front();
+        shapes.push_back({full.left - tb.wr.left, 0, full.right - tb.wr.left, tb.wr.bottom - tb.wr.top});
         radius = 0;
-    } else {
-        for (const RECT& span : spans) shapes.push_back(SpanToWindowRect(wr, span, style));
+    } else if (tb.state == kShapes) {
+        for (const RECT& span : tb.shown) shapes.push_back(SpanToWindowRect(tb.wr, span, tb.style));
     }
-    tb.backdrop->Show(tb.hwnd, wr, shapes, radius, config_, dpi ? dpi : 96);
+
+    auto sync = [&](std::unique_ptr<Backdrop>& layer, bool wanted, Backdrop::Layer kind, const std::vector<RECT>& layerShapes) {
+        if (!wanted) {
+            layer.reset();
+            return;
+        }
+        if (!layer) layer = std::make_unique<Backdrop>(kind);
+        if (layerShapes.empty()) layer->Hide();
+        else layer->Show(tb.hwnd, tb.wr, layerShapes, radius, config_, tb.dpi);
+    };
+    sync(tb.fill, config_.background != Background::Default && FillVisible(), Backdrop::Layer::Fill, shapes);
+    // A full-width taskbar is the normal Windows look: no outline.
+    sync(tb.border, BorderActive(), Backdrop::Layer::Border, tb.state == kShapes ? shapes : std::vector<RECT>{});
+}
+
+bool Engine::Animating() const {
+    for (const Taskbar& tb : taskbars_) {
+        if (!SameSpans(tb.shown, tb.target)) return true;
+    }
+    return false;
+}
+
+bool Engine::Animate() {
+    bool moving = false;
+    for (Taskbar& tb : taskbars_) {
+        if (SameSpans(tb.shown, tb.target)) continue;
+        if (tb.shown.size() != tb.target.size()) {
+            tb.shown = tb.target;
+        } else {
+            for (size_t i = 0; i < tb.shown.size(); ++i) {
+                Approach(tb.shown[i].left, tb.target[i].left);
+                Approach(tb.shown[i].right, tb.target[i].right);
+            }
+        }
+        Present(tb, false);
+        moving |= !SameSpans(tb.shown, tb.target);
+    }
+    return moving;
 }
 
 void Engine::ClearAll() {
     for (Taskbar& tb : taskbars_) {
         if (IsWindow(tb.hwnd)) ClearRegion(tb.hwnd);
         tb.applied.reset();
-        tb.backdrop.reset();
+        tb.fill.reset();
+        tb.border.reset();
+        tb.shown.clear();
+        tb.target.clear();
     }
     ClearAllTaskbars();
 }
@@ -496,8 +584,8 @@ std::wstring Engine::Status() const {
         s += tb.primary ? std::wstring(L"Main taskbar: ") : L"Monitor " + std::to_wstring(++secondary + 1) + L": ";
         s += tb.status.empty() ? L"pending" : tb.status;
     }
-    if (config_.background != Background::Default && !IsProcessRunning(L"TranslucentTB.exe")) {
-        s += L"\r\n⚠ TranslucentTB is not running: the custom background stays hidden behind the Windows one.";
+    if (config_.background != Background::Default && !translucentTbRunning_) {
+        s += L"\r\n⚠ TranslucentTB is not running, so the custom background is off. Start it with the taskbar set to Clear.";
     }
     return s;
 }

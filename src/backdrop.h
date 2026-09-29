@@ -8,12 +8,17 @@
 
 namespace fb {
 
-// A click-through layered window kept directly below one taskbar in z-order.
-// It draws antialiased island backgrounds; they only show through when the
-// taskbar's own background is transparent (TranslucentTB set to Clear).
+// A click-through layered window that draws antialiased island shapes next to
+// one taskbar in z-order.
+//   Fill:   directly below the taskbar. Only visible when the taskbar's own
+//           background is transparent (TranslucentTB set to Clear).
+//   Border: directly above the taskbar. Always visible, and it covers the
+//           stepped edge of the pixel-exact clip.
 class Backdrop {
 public:
-    Backdrop() = default;
+    enum class Layer { Fill, Border };
+
+    explicit Backdrop(Layer layer) : layer_(layer) {}
     Backdrop(const Backdrop&) = delete;
     Backdrop& operator=(const Backdrop&) = delete;
     ~Backdrop();
@@ -25,7 +30,9 @@ public:
 
 private:
     void Render(const RECT& windowRect, const std::vector<RECT>& shapes, int radius, const Config& config, UINT dpi);
+    void Restack(HWND taskbar);
 
+    Layer layer_;
     HWND hwnd_ = nullptr;
     std::vector<LONG> key_;
 };

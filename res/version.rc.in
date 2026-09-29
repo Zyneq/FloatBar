@@ -17,7 +17,7 @@ BEGIN
             VALUE "FileDescription",  "FloatBar - floating split taskbar for Windows 11"
             VALUE "FileVersion",      "@FB_VERSION@"
             VALUE "InternalName",     "floatbar"
-            VALUE "LegalCopyright",   "Zyneq. Licensed under CC BY 4.0."
+            VALUE "LegalCopyright",   "Copyright (c) 2026 Zyneq. MIT License."
             VALUE "OriginalFilename", "floatbar.exe"
             VALUE "ProductName",      "FloatBar"
             VALUE "ProductVersion",   "@FB_VERSION@"

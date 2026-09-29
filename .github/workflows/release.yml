@@ -21,6 +21,11 @@ jobs:
       contents: write       # create the release
       id-token: write       # sign the attestation (Sigstore)
       attestations: write   # store the attestation
+      actions: read         # lets SignPath fetch the unsigned artifact
+    env:
+      # Code signing switches on by itself once the repository has the
+      # SIGNPATH_API_TOKEN secret (and the SIGNPATH_ORGANIZATION_ID variable).
+      SIGN: ${{ github.ref_type == 'tag' && secrets.SIGNPATH_API_TOKEN != '' }}
     steps:
       - uses: actions/checkout@v5
 
@@ -44,7 +49,37 @@ jobs:
       - name: Build
         run: cmake --build build --config Release
 
-      # The release is a single file: floatbar.exe (+ its checksum).
+      # ---- Code signing via SignPath Foundation (tags only, approved by hand) ----
+      - name: Upload unsigned exe for signing
+        id: unsigned
+        if: env.SIGN == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: unsigned-${{ github.run_number }}
+          path: build/Release/floatbar.exe
+
+      - name: Sign with SignPath
+        if: env.SIGN == 'true'
+        uses: signpath/github-action-submit-signing-request@v1
+        with:
+          api-token: ${{ secrets.SIGNPATH_API_TOKEN }}
+          organization-id: ${{ vars.SIGNPATH_ORGANIZATION_ID }}
+          project-slug: FloatBar
+          signing-policy-slug: release-signing
+          github-artifact-id: ${{ steps.unsigned.outputs.artifact-id }}
+          wait-for-completion: true
+          output-artifact-directory: signed
+
+      - name: Use and check the signed exe
+        if: env.SIGN == 'true'
+        shell: pwsh
+        run: |
+          Copy-Item signed/floatbar.exe build/Release/floatbar.exe -Force
+          $sig = Get-AuthenticodeSignature build/Release/floatbar.exe
+          "$($sig.Status): $($sig.SignerCertificate.Subject)"
+          if ($sig.Status -ne 'Valid') { throw "floatbar.exe is not validly signed" }
+
+      # The release is a single file: floatbar.exe (+ its checksum), hashed after signing.
       - name: Hash
         shell: pwsh
         run: |

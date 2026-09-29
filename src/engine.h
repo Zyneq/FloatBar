@@ -53,6 +53,11 @@ public:
     bool NeedsHoverPolling() const;
     bool PollHover();
 
+    // Island edges ease towards their measured positions. While Animating() is
+    // true, call Animate() about every 16 ms; it returns false once settled.
+    bool Animating() const;
+    bool Animate();
+
     void ClearAll();
     std::wstring Status() const;
     std::vector<MonitorEntry> Monitors() const;
@@ -70,7 +75,19 @@ private:
         std::wstring status;
         bool hovered = false;
         DWORD lastInside = 0;
-        std::unique_ptr<Backdrop> backdrop;  // only with a custom background
+
+        // What is on screen right now, so animation frames can redraw it.
+        LONG state = 0;
+        RECT wr{};
+        SpanStyle style{};
+        UINT dpi = 96;
+        bool trimShowDesktop = false;
+        RECT showDesktop{};
+        std::vector<RECT> target;  // where the spans should be
+        std::vector<RECT> shown;   // where they are drawn (eases towards target)
+
+        std::unique_ptr<Backdrop> fill;    // custom background, below the taskbar
+        std::unique_ptr<Backdrop> border;  // outline, above the taskbar
     };
 
     // Foreground/maximised state shared by all taskbars during one update.
@@ -84,7 +101,11 @@ private:
 
     Context BuildContext() const;
     bool UpdateOne(Taskbar& tb, bool force, bool readBounds, const Context& ctx);
-    void SyncBackdrop(Taskbar& tb, LONG state, const RECT& wr, const std::vector<RECT>& spans, const SpanStyle& style, UINT dpi);
+    // Applies tb.shown (region + layers) in tb.state; skips unchanged output unless `force`.
+    void Present(Taskbar& tb, bool force);
+    void SyncLayers(Taskbar& tb);
+    bool FillVisible();
+    bool BorderActive() const { return config_.borderWidth > 0 && config_.borderOpacity > 0; }
     bool IsTaskbar(HWND hwnd) const;
     bool NeedsGlobalHooks() const;
     void InstallGlobalHooks();
@@ -102,6 +123,8 @@ private:
     std::vector<HWINEVENTHOOK> globalHooks_;
     DWORD explorerPid_ = 0;
     bool switching_ = false;
+    bool translucentTbRunning_ = false;  // cached; checked every few seconds
+    DWORD translucentTbCheckedAt_ = 0;
 };
 
 }  // namespace fb

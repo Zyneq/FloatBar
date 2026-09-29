@@ -37,7 +37,8 @@ constexpr wchar_t kRunValue[] = L"FloatBar";
 constexpr UINT WM_APP_TRAY = WM_APP + 1;
 constexpr UINT WM_APP_SHOW_SETTINGS = WM_APP + 2;
 
-enum TimerId : UINT_PTR { kTimerDebounce = 1, kTimerPoll, kTimerSave, kTimerSettle, kTimerHover };
+enum TimerId : UINT_PTR { kTimerDebounce = 1, kTimerPoll, kTimerSave, kTimerSettle, kTimerHover, kTimerAnimate };
+constexpr UINT kFrameMs = 16;          // animation frame (~60 fps), only while islands move
 constexpr UINT kDebounceMs = 100;      // taskbar content changed
 constexpr UINT kWindowEventMs = 30;    // other windows changed (maximise, foreground)
 constexpr UINT kRetryMs = 150;
@@ -82,6 +83,7 @@ void RunUpdate(bool force, bool readBounds = true) {
         fb::settings::RefreshControls();  // the monitor list may have changed
     }
     if (g_engine->Update(force, readBounds)) ScheduleUpdate(true, kRetryMs);
+    if (g_engine->Animating()) SetTimer(g_mainWnd, kTimerAnimate, kFrameMs, nullptr);
     fb::settings::RefreshStatus();
 }
 
@@ -180,6 +182,9 @@ LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
                 }
                 case kTimerHover:
                     if (g_engine->PollHover()) RunUpdate(false, false);
+                    break;
+                case kTimerAnimate:
+                    if (!g_engine->Animate()) KillTimer(hwnd, kTimerAnimate);
                     break;
                 case kTimerPoll:
                     RunUpdate(false);

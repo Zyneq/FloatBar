@@ -28,6 +28,7 @@ enum ControlId : int {
     kIdFillMaximise,
     kIdFillTaskSwitch,
     kIdAutoHide,
+    kIdAnimate,
     kIdHideFullscreen,
     kIdHideShowDesktop,
     kIdAutostart,
@@ -107,6 +108,7 @@ const Check kChecks[] = {
     {kIdFillMaximise, &Config::fillOnMaximise},
     {kIdFillTaskSwitch, &Config::fillOnTaskSwitch},
     {kIdAutoHide, &Config::autoHide},
+    {kIdAnimate, &Config::animate},
     {kIdHideFullscreen, &Config::hideOverFullscreen},
     {kIdHideShowDesktop, &Config::hideShowDesktop},
 };
@@ -211,7 +213,7 @@ SIZE Layout(UINT dpi) {
     y += S(38);
     place(kIdSecBehaviour, x1, y, col, S(20));
     y += S(26);
-    for (int id : {kIdFillMaximise, kIdFillTaskSwitch, kIdAutoHide, kIdHideFullscreen, kIdHideShowDesktop, kIdAutostart,
+    for (int id : {kIdFillMaximise, kIdFillTaskSwitch, kIdAutoHide, kIdAnimate, kIdHideFullscreen, kIdHideShowDesktop, kIdAutostart,
                    kIdDebugLogging}) {
         place(id, x1, y, col, S(24));
         y += S(28);
@@ -339,6 +341,7 @@ void CreateControls() {
     AddControl(WC_BUTTONW, L"Extend taskbar when a window is maximised", check, kIdFillMaximise);
     AddControl(WC_BUTTONW, L"Extend taskbar during Alt+Tab / Task View", check, kIdFillTaskSwitch);
     AddControl(WC_BUTTONW, L"Auto-hide (reveal on mouse over)", check, kIdAutoHide);
+    AddControl(WC_BUTTONW, L"Smooth island animation", check, kIdAnimate);
     AddControl(WC_BUTTONW, L"Hide taskbar over fullscreen apps", check, kIdHideFullscreen);
     AddControl(WC_BUTTONW, L"Hide the Show Desktop sliver", check, kIdHideShowDesktop);
     AddControl(WC_BUTTONW, L"Start with Windows", check, kIdAutostart);
@@ -360,13 +363,14 @@ void CreateControls() {
     AddControl(WC_BUTTONW, L"Colour 1", swatch, kIdColor1);
     AddControl(WC_BUTTONW, L"Colour 2", swatch, kIdColor2);
     AddControl(WC_STATICW, L"Direction", SS_LEFT, kIdDirectionLabel);
-    AddCombo(kIdDirection, {L"Left → right", L"Top → bottom", L"Diagonal ↘", L"Diagonal ↗"});
+    AddCombo(kIdDirection, {L"Left → right", L"Top → bottom", L"Diagonal ↘", L"Diagonal ↗", L"Left → centre ← right"});
     AddSlider(kIdOpacity);
     AddSlider(kIdBorderWidth);
     AddControl(WC_STATICW, L"Border colour", SS_LEFT, kIdBorderColorLabel);
     AddControl(WC_BUTTONW, L"Border colour", swatch, kIdBorderColor);
     AddSlider(kIdBorderOpacity);
-    AddControl(WC_STATICW, L"Custom backgrounds need TranslucentTB with the taskbar set to Clear.", SS_LEFT, kIdAppearanceNote);
+    AddControl(WC_STATICW, L"The border works everywhere. A custom background needs TranslucentTB with the taskbar set to Clear.",
+               SS_LEFT, kIdAppearanceNote);
 
     AddControl(WC_STATICW, L"Status", SS_LEFT, kIdSecStatus);
     AddControl(WC_STATICW, L"", SS_LEFT | SS_NOPREFIX, kIdStatus);
@@ -386,12 +390,12 @@ void UpdateEnabledStates(const Config& c) {
     const bool islands = on && c.mode == LayoutMode::Islands;
     const bool custom = on && c.background != Background::Default;
     const bool gradient = custom && c.background == Background::Gradient;
-    const bool border = custom && c.borderWidth > 0;
-    for (int id : {kIdMode, kIdFillMaximise, kIdFillTaskSwitch, kIdAutoHide, kIdHideFullscreen, kIdHideShowDesktop, kIdRadius, kIdTop,
-                   kIdBottom, kIdPadding, kIdBackground, kIdMonitor, kIdMonitorMode})
+    const bool border = on && c.borderWidth > 0;  // the border works with any background
+    for (int id : {kIdMode, kIdFillMaximise, kIdFillTaskSwitch, kIdAutoHide, kIdAnimate, kIdHideFullscreen, kIdHideShowDesktop, kIdRadius,
+                   kIdTop, kIdBottom, kIdPadding, kIdBackground, kIdBorderWidth, kIdMonitor, kIdMonitorMode})
         EnableWindow(Item(id), on);
     for (int id : {kIdTray, kIdWidgets}) EnableWindow(Item(id), islands);
-    for (int id : {kIdColor1, kIdOpacity, kIdBorderWidth}) EnableWindow(Item(id), custom);
+    for (int id : {kIdColor1, kIdOpacity}) EnableWindow(Item(id), custom);
     for (int id : {kIdColor2, kIdDirection}) EnableWindow(Item(id), gradient);
     for (int id : {kIdBorderColor, kIdBorderOpacity}) EnableWindow(Item(id), border);
 }

@@ -9,6 +9,10 @@ namespace {
 
 constexpr wchar_t kClassName[] = L"FloatBarBackdrop";
 
+// The border ring reaches this far past the ideal outline so it also hides the
+// clip's stepped pixels, which can sit up to about a pixel outside it.
+constexpr float kEdgeCover = 0.75f;
+
 // Signed distance from a point to a rounded rectangle (negative inside).
 float RoundRectDistance(float px, float py, const RECT& r, float radius) {
     const float hw = (r.right - r.left) / 2.0f, hh = (r.bottom - r.top) / 2.0f;
@@ -30,6 +34,7 @@ float GradientT(float px, float py, const RECT& r, GradientDirection dir) {
         case GradientDirection::Vertical: return v;
         case GradientDirection::DiagonalDown: return (u + v) / 2;
         case GradientDirection::DiagonalUp: return (u + 1 - v) / 2;
+        case GradientDirection::Center: return 1 - std::fabs(2 * u - 1);
         default: return u;
     }
 }
@@ -65,21 +70,37 @@ void Backdrop::Show(HWND taskbar, const RECT& windowRect, const std::vector<RECT
         key_.clear();
     }
 
-    std::vector<LONG> key = {windowRect.left, windowRect.top, windowRect.right, windowRect.bottom, radius,
-                             static_cast<LONG>(dpi), static_cast<LONG>(config.background), static_cast<LONG>(config.color1),
-                             static_cast<LONG>(config.color2), static_cast<LONG>(config.gradientDirection), config.opacity,
-                             config.borderWidth, static_cast<LONG>(config.borderColor), config.borderOpacity};
+    std::vector<LONG> key = {windowRect.left, windowRect.top, windowRect.right, windowRect.bottom, radius, static_cast<LONG>(dpi)};
+    if (layer_ == Layer::Fill) {
+        key.insert(key.end(), {static_cast<LONG>(config.background), static_cast<LONG>(config.color1), static_cast<LONG>(config.color2),
+                               static_cast<LONG>(config.gradientDirection), config.opacity});
+    } else {
+        key.insert(key.end(), {config.borderWidth, static_cast<LONG>(config.borderColor), config.borderOpacity});
+    }
     for (const RECT& s : shapes) key.insert(key.end(), {s.left, s.top, s.right, s.bottom});
     if (key != key_) {
         Render(windowRect, shapes, radius, config, dpi);
         key_ = std::move(key);
     }
+    Restack(taskbar);
+}
 
-    // Directly below the taskbar. Inserting after a non-topmost taskbar (fullscreen
-    // app) also drops the backdrop out of the topmost band, so it never covers games.
-    if (GetWindow(taskbar, GW_HWNDNEXT) != hwnd_ || !IsWindowVisible(hwnd_)) {
-        SetWindowPos(hwnd_, taskbar, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW);
+void Backdrop::Restack(HWND taskbar) {
+    const UINT flags = SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW;
+    const bool visible = IsWindowVisible(hwnd_) != FALSE;
+    if (layer_ == Layer::Fill) {
+        // Directly below the taskbar. Inserting after a non-topmost taskbar (fullscreen
+        // app) also drops the window out of the topmost band, so it never covers games.
+        if (GetWindow(taskbar, GW_HWNDNEXT) != hwnd_ || !visible) SetWindowPos(hwnd_, taskbar, 0, 0, 0, 0, flags);
+        return;
     }
+    // Directly above the taskbar: insert after whatever is above it. That keeps
+    // Start, flyouts and fullscreen apps above the border, not below it.
+    HWND above = GetWindow(taskbar, GW_HWNDPREV);
+    if (above == hwnd_ && visible) return;
+    if (above == hwnd_) above = GetWindow(hwnd_, GW_HWNDPREV);
+    if (!above) above = (GetWindowLongW(taskbar, GWL_EXSTYLE) & WS_EX_TOPMOST) ? HWND_TOPMOST : HWND_TOP;
+    SetWindowPos(hwnd_, above, 0, 0, 0, 0, flags);
 }
 
 void Backdrop::Render(const RECT& windowRect, const std::vector<RECT>& shapes, int radius, const Config& config, UINT dpi) {
@@ -106,42 +127,42 @@ void Backdrop::Render(const RECT& windowRect, const std::vector<RECT>& shapes, i
     }
     HGDIOBJ old = SelectObject(mem, bitmap);
 
-    const float fillAlpha = config.opacity / 100.0f;
-    const float borderAlpha = config.borderOpacity / 100.0f;
+    const bool fill = layer_ == Layer::Fill;
+    const float alpha = (fill ? config.opacity : config.borderOpacity) / 100.0f;
     const float border = static_cast<float>(MulDiv(config.borderWidth, static_cast<int>(dpi), 96));
     const bool gradient = config.background == Background::Gradient;
     const float r1 = GetRValue(config.color1), g1 = GetGValue(config.color1), b1 = GetBValue(config.color1);
     const float r2 = GetRValue(config.color2), g2 = GetGValue(config.color2), b2 = GetBValue(config.color2);
     const float rb = GetRValue(config.borderColor), gb = GetGValue(config.borderColor), bb = GetBValue(config.borderColor);
+    const int reach = fill ? 1 : 2;  // pixels outside the shape that can be touched
 
     auto* pixels = static_cast<uint32_t*>(bits);
     std::fill(pixels, pixels + static_cast<size_t>(width) * height, 0u);
     for (const RECT& shape : shapes) {
-        // Only visit the pixels this shape can touch.
-        const int x0 = std::max(0, static_cast<int>(shape.left) - 1), x1 = std::min(width, static_cast<int>(shape.right) + 1);
-        const int y0 = std::max(0, static_cast<int>(shape.top) - 1), y1 = std::min(height, static_cast<int>(shape.bottom) + 1);
+        const int x0 = std::max(0, static_cast<int>(shape.left) - reach), x1 = std::min(width, static_cast<int>(shape.right) + reach);
+        const int y0 = std::max(0, static_cast<int>(shape.top) - reach), y1 = std::min(height, static_cast<int>(shape.bottom) + reach);
         for (int y = y0; y < y1; ++y) {
             for (int x = x0; x < x1; ++x) {
                 const float px = x + 0.5f, py = y + 0.5f;
                 const float d = RoundRectDistance(px, py, shape, static_cast<float>(radius));
-                const float outer = Coverage(d);
-                if (outer <= 0) continue;
-                // The border is the ring between the outline and `border` px inside it.
-                const float inner = border > 0 ? Coverage(d + border) : outer;
-                const float t = gradient ? GradientT(px, py, shape, config.gradientDirection) : 0.0f;
-                const float fa = fillAlpha * inner;
-                const float ba = borderAlpha * (outer - inner);
-                const float a = fa + ba;
+                float coverage, r, g, b;
+                if (fill) {
+                    coverage = Coverage(d);
+                    const float t = gradient ? GradientT(px, py, shape, config.gradientDirection) : 0.0f;
+                    r = Lerp(r1, r2, t), g = Lerp(g1, g2, t), b = Lerp(b1, b2, t);
+                } else {
+                    // The ring between `border` px inside the outline and kEdgeCover outside it.
+                    coverage = Coverage(d - kEdgeCover) - Coverage(d + border);
+                    r = rb, g = gb, b = bb;
+                }
+                const float a = alpha * coverage;
                 if (a <= 0) continue;
-                // Premultiplied BGRA.
-                const float r = Lerp(r1, r2, t) * fa + rb * ba;
-                const float g = Lerp(g1, g2, t) * fa + gb * ba;
-                const float b = Lerp(b1, b2, t) * fa + bb * ba;
                 uint32_t& p = pixels[static_cast<size_t>(y) * width + x];
                 // Shapes never overlap in practice; keep the stronger pixel if they touch.
                 if ((p >> 24) >= static_cast<uint32_t>(a * 255.0f)) continue;
-                p = (static_cast<uint32_t>(a * 255.0f + 0.5f) << 24) | (static_cast<uint32_t>(r + 0.5f) << 16) |
-                    (static_cast<uint32_t>(g + 0.5f) << 8) | static_cast<uint32_t>(b + 0.5f);
+                // Premultiplied BGRA.
+                p = (static_cast<uint32_t>(a * 255.0f + 0.5f) << 24) | (static_cast<uint32_t>(r * a + 0.5f) << 16) |
+                    (static_cast<uint32_t>(g * a + 0.5f) << 8) | static_cast<uint32_t>(b * a + 0.5f);
             }
         }
     }

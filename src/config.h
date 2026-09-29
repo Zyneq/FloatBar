@@ -22,7 +22,8 @@ enum class Background {
     Gradient,
 };
 
-enum class GradientDirection { Horizontal, Vertical, DiagonalDown, DiagonalUp };
+// Center: colour 1 at the left and right edges, colour 2 in the middle.
+enum class GradientDirection { Horizontal, Vertical, DiagonalDown, DiagonalUp, Center };
 
 // Per-monitor override of the global settings.
 enum class MonitorMode {
@@ -44,6 +45,7 @@ struct Config {
     bool fillOnMaximise = false;
     bool fillOnTaskSwitch = false;
     bool autoHide = false;
+    bool animate = true;             // ease island edges to new positions instead of jumping
     bool hideOverFullscreen = true;  // hide while a fullscreen/borderless app covers the monitor
     bool hideShowDesktop = false;    // clip the Show Desktop sliver in full-width and bar modes too
     std::map<std::wstring, MonitorMode> monitorModes;  // key: monitor device name, e.g. \\.\DISPLAY2
@@ -54,7 +56,7 @@ struct Config {
     unsigned long color2 = 0x00F6823B;
     GradientDirection gradientDirection = GradientDirection::Horizontal;
     int opacity = 85;        // percent
-    int borderWidth = 1;
+    int borderWidth = 0;     // drawn above the taskbar; works without TranslucentTB
     unsigned long borderColor = 0x00FFFFFF;
     int borderOpacity = 15;  // percent
 

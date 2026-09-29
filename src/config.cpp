@@ -23,7 +23,7 @@ constexpr wchar_t kHeader[] =
 constexpr const wchar_t* kModeNames[] = {L"islands", L"bar"};
 constexpr const wchar_t* kTrayNames[] = {L"show", L"hover", L"hide"};
 constexpr const wchar_t* kBackgroundNames[] = {L"default", L"solid", L"gradient"};
-constexpr const wchar_t* kDirectionNames[] = {L"horizontal", L"vertical", L"diagonalDown", L"diagonalUp"};
+constexpr const wchar_t* kDirectionNames[] = {L"horizontal", L"vertical", L"diagonalDown", L"diagonalUp", L"center"};
 constexpr const wchar_t* kMonitorModeNames[] = {L"default", L"normal", L"hidden"};
 
 class Ini {
@@ -117,6 +117,7 @@ Config LoadConfig() {
     ini.Read(L"fillOnMaximise", c.fillOnMaximise);
     ini.Read(L"fillOnTaskSwitch", c.fillOnTaskSwitch);
     ini.Read(L"autoHide", c.autoHide);
+    ini.Read(L"animate", c.animate);
     ini.Read(L"hideOverFullscreen", c.hideOverFullscreen);
     ini.Read(L"hideShowDesktop", c.hideShowDesktop);
     ini.ReadEnum(L"background", c.background, kBackgroundNames);
@@ -164,6 +165,7 @@ bool SaveConfig(const Config& c) {
     ini.Write(L"fillOnMaximise", c.fillOnMaximise);
     ini.Write(L"fillOnTaskSwitch", c.fillOnTaskSwitch);
     ini.Write(L"autoHide", c.autoHide);
+    ini.Write(L"animate", c.animate);
     ini.Write(L"hideOverFullscreen", c.hideOverFullscreen);
     ini.Write(L"hideShowDesktop", c.hideShowDesktop);
     ini.WriteEnum(L"background", c.background, kBackgroundNames);
