@@ -8,10 +8,11 @@
 #include <string>
 #include <vector>
 
+#include "backdrop.h"
 #include "bounds.h"
+#include "bounds_worker.h"
 #include "config.h"
 #include "region.h"
-#include "backdrop.h"
 
 namespace fb {
 
@@ -23,8 +24,16 @@ struct MonitorEntry {
     std::wstring label;  // "Main taskbar (1920×1080)"
 };
 
-// Owns the taskbar list, the WinEvent hooks and the applied regions.
-// Everything runs on the main (UI) thread.
+// One rounded island in screen coordinates (only left/right matter; the height
+// comes from the style). `id` says which island it is, so animation can match an
+// island across frames and grow or shrink islands that appear or disappear.
+struct Span {
+    RECT rect{};
+    int id = 0;
+};
+
+// Owns the taskbar list, the WinEvent hooks and the applied regions. Runs on
+// the UI thread; UI Automation reads happen on a BoundsWorker thread.
 class Engine {
 public:
     struct Callbacks {
@@ -32,9 +41,15 @@ public:
         std::function<void()> windowsChanged;  // other windows changed: re-evaluate fill/auto-hide only
     };
 
+    struct UpdateResult {
+        bool retry = false;   // a read failed transiently: read again soon
+        bool reread = false;  // a taskbar is mid-relayout: read it again quickly until it settles
+    };
+
     ~Engine();
 
-    HRESULT Init(Callbacks callbacks);
+    // Bounds results arrive as `boundsMessage` on `notifyWnd`; pass them to OnBounds().
+    HRESULT Init(Callbacks callbacks, HWND notifyWnd, UINT boundsMessage);
     // Also installs or removes the system-wide hooks the behaviour options need.
     void SetConfig(const Config& config);
 
@@ -43,20 +58,24 @@ public:
     void Detach();
     bool TaskbarsChanged() const;
 
-    // Reapplies regions where they changed (or always, if `force`). With
-    // `readBounds` false the last known button bounds are reused, which is cheap.
-    // Returns true when a transient failure wants a quick retry.
-    bool Update(bool force, bool readBounds);
+    // Re-evaluates every taskbar with the last known bounds (cheap) and, with
+    // `readBounds`, also asks the worker for fresh bounds. `force` redraws even
+    // when nothing changed and skips animation.
+    void Update(bool force, bool readBounds);
+    // Asks for fresh bounds of the taskbars that are still settling.
+    void RequestSettlingReads();
+    // A read finished (from the worker's message); takes ownership of `reply`.
+    UpdateResult OnBounds(BoundsWorker::Reply* reply);
 
     // Mouse tracking for auto-hide and the hover tray. Returns true if any
     // taskbar's hover state changed.
     bool NeedsHoverPolling() const;
     bool PollHover();
 
-    // Island edges ease towards their measured positions. While Animating() is
-    // true, call Animate() about every 16 ms; it returns false once settled.
+    // Time-based island animation. While Animating(), call Animate() once per
+    // display frame (after DwmFlush); it positions everything for "now".
     bool Animating() const;
-    bool Animate();
+    void Animate();
 
     void ClearAll();
     std::wstring Status() const;
@@ -71,20 +90,40 @@ private:
         std::optional<Islands> islands;  // last good bounds
         std::optional<Key> applied;
         int failures = 0;
+        bool forcePending = false;       // a forced update is waiting for its read
         std::wstring lastError;
         std::wstring status;
         bool hovered = false;
         DWORD lastInside = 0;
 
+        // Settling: while explorer relayouts (it passes through intermediate
+        // layouts), `display` only grows to cover every reading, and takes the
+        // real reading once two reads in a row agree.
+        std::optional<Islands> lastRead;
+        Islands display;
+        bool settling = false;
+        int stableReads = 0;
+        DWORD settleStart = 0;
+
         // What is on screen right now, so animation frames can redraw it.
-        LONG state = 0;
+        LONG logical = -1;             // the decided state
+        LONG state = 0;                // the drawn state (islands while morphing to/from full width)
+        bool fillWhenSettled = false;  // morphing towards full width
         RECT wr{};
-        SpanStyle style{};
+        RECT fillSpan{};               // the full-width extent (minus a trimmed Show Desktop sliver)
         UINT dpi = 96;
         bool trimShowDesktop = false;
         RECT showDesktop{};
-        std::vector<RECT> target;  // where the spans should be
-        std::vector<RECT> shown;   // where they are drawn (eases towards target)
+        std::vector<Span> target;      // where the islands should end up
+        SpanStyle targetStyle{};
+        std::vector<Span> shown;       // where they are drawn this frame
+        SpanStyle style{};             // drawn style
+
+        // Linear tween from `from` to `to` (which also holds shrinking islands).
+        bool tweening = false;
+        double tweenStart = 0, tweenDuration = 0;  // milliseconds
+        std::vector<Span> from, to;
+        SpanStyle fromStyle{}, toStyle{};
 
         std::unique_ptr<Backdrop> fill;    // custom background, below the taskbar
         std::unique_ptr<Backdrop> border;  // outline, above the taskbar
@@ -100,12 +139,17 @@ private:
     };
 
     Context BuildContext() const;
-    bool UpdateOne(Taskbar& tb, bool force, bool readBounds, const Context& ctx);
+    void Layout(Taskbar& tb, bool force, const Context& ctx);
+    // Folds a fresh reading into tb.display; returns true while still settling.
+    bool Settle(Taskbar& tb, const Islands& fresh);
+    // Moves towards tb.target/targetStyle: snaps, or (re)starts a tween from what is shown.
+    void Retarget(Taskbar& tb, bool snap);
     // Applies tb.shown (region + layers) in tb.state; skips unchanged output unless `force`.
     void Present(Taskbar& tb, bool force);
     void SyncLayers(Taskbar& tb);
     bool FillVisible();
     bool BorderActive() const { return config_.borderWidth > 0 && config_.borderOpacity > 0; }
+    Taskbar* Find(HWND hwnd);
     bool IsTaskbar(HWND hwnd) const;
     bool NeedsGlobalHooks() const;
     void InstallGlobalHooks();
@@ -115,7 +159,7 @@ private:
     static void CALLBACK GlobalEventProc(HWINEVENTHOOK, DWORD, HWND, LONG, LONG, DWORD, DWORD);
     static Engine* s_instance;
 
-    BoundsReader reader_;
+    BoundsWorker worker_;
     Config config_;
     Callbacks callbacks_;
     std::vector<Taskbar> taskbars_;

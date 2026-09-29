@@ -4,6 +4,7 @@
 #include <tlhelp32.h>
 
 #include <algorithm>
+#include <cmath>
 
 #include "uia_util.h"
 #include "log.h"
@@ -25,7 +26,7 @@ std::wstring Label(HWND hwnd, bool primary) {
     return (primary ? L"primary " : L"secondary ") + FormatHwnd(hwnd);
 }
 
-std::wstring Span(const RECT& r) {
+std::wstring SpanText(const RECT& r) {
     return std::to_wstring(r.left) + L"–" + std::to_wstring(r.right);
 }
 
@@ -58,28 +59,85 @@ BOOL CALLBACK CollectMaximised(HWND hwnd, LPARAM lParam) {
 
 RECT Padded(const RECT& r, int padding) { return {r.left - padding, r.top, r.right + padding, r.bottom}; }
 
-// Spans only differ horizontally; their height comes from the style.
-bool SameSpans(const std::vector<RECT>& a, const std::vector<RECT>& b) {
+// Island ids (see Span).
+constexpr int kIdApp = 0;
+constexpr int kIdTray = 1;
+constexpr int kIdBar = 2;
+constexpr int kIdExtra = 100;  // + index
+
+const Span* FindSpan(const std::vector<Span>& spans, int id) {
+    for (const Span& s : spans) {
+        if (s.id == id) return &s;
+    }
+    return nullptr;
+}
+
+// Same islands at the same horizontal positions (height comes from the style).
+bool SameSpans(const std::vector<Span>& a, const std::vector<Span>& b) {
     if (a.size() != b.size()) return false;
-    for (size_t i = 0; i < a.size(); ++i) {
-        if (a[i].left != b[i].left || a[i].right != b[i].right) return false;
+    for (const Span& s : a) {
+        const Span* t = FindSpan(b, s.id);
+        if (!t || t->rect.left != s.rect.left || t->rect.right != s.rect.right) return false;
     }
     return true;
 }
 
-// One animation frame of ease-out: cover a fixed share of the remaining
-// distance, so edges move fast at first and settle gently (~120 ms at 60 fps).
-constexpr float kEaseShare = 0.3f;
+bool SameStyle(const SpanStyle& a, const SpanStyle& b) {
+    return a.marginTop == b.marginTop && a.marginBottom == b.marginBottom && a.radius == b.radius;
+}
 
-void Approach(LONG& current, LONG target) {
-    const LONG diff = target - current;
-    if (diff >= -1 && diff <= 1) {
-        current = target;
-        return;
+// Island motion is linear in time (constant speed, no ease ramps), sampled
+// once per display frame. The duration follows the distance, within limits.
+constexpr double kTweenMsPerPixel = 0.3;
+constexpr double kMinTweenMs = 120;
+constexpr double kMaxTweenMs = 280;
+
+double NowMs() {
+    static const double ticksPerMs = [] {
+        LARGE_INTEGER f;
+        QueryPerformanceFrequency(&f);
+        return static_cast<double>(f.QuadPart) / 1000.0;
+    }();
+    LARGE_INTEGER now;
+    QueryPerformanceCounter(&now);
+    return static_cast<double>(now.QuadPart) / ticksPerMs;
+}
+
+LONG Lerp(LONG a, LONG b, double t) { return a + static_cast<LONG>(std::lround((b - a) * t)); }
+int Lerp(int a, int b, double t) { return a + static_cast<int>(std::lround((b - a) * t)); }
+
+// The islands stretched until they tile `full` edge to edge: the neighbours meet
+// halfway across each gap. With zero margins and radius this looks exactly like
+// the full-width taskbar, so morphing between the two is seamless.
+std::vector<Span> Expanded(std::vector<Span> spans, const RECT& full) {
+    if (spans.empty()) return spans;
+    std::sort(spans.begin(), spans.end(), [](const Span& a, const Span& b) { return a.rect.left < b.rect.left; });
+    spans.front().rect.left = full.left;
+    spans.back().rect.right = full.right;
+    for (size_t i = 0; i + 1 < spans.size(); ++i) {
+        const LONG meet = (spans[i].rect.right + spans[i + 1].rect.left) / 2;
+        spans[i].rect.right = meet;
+        spans[i + 1].rect.left = meet;
     }
-    LONG step = static_cast<LONG>(diff * kEaseShare);
-    if (step == 0) step = diff > 0 ? 1 : -1;
-    current += step;
+    return spans;
+}
+
+bool SameIslands(const Islands& a, const Islands& b) {
+    if (!EqualRect(&a.app, &b.app) || a.hasTray != b.hasTray || (a.hasTray && !EqualRect(&a.tray, &b.tray))) return false;
+    if (a.extras.size() != b.extras.size()) return false;
+    for (size_t i = 0; i < a.extras.size(); ++i) {
+        if (!EqualRect(&a.extras[i], &b.extras[i])) return false;
+    }
+    return true;
+}
+
+// `fresh`, but with the app and tray islands grown to also cover `held`, so a
+// mid-relayout reading never makes an island shrink and clip a button.
+Islands Merged(const Islands& held, const Islands& fresh) {
+    Islands out = fresh;
+    UnionRect(&out.app, &held.app, &fresh.app);
+    if (held.hasTray && fresh.hasTray) UnionRect(&out.tray, &held.tray, &fresh.tray);
+    return out;
 }
 
 // Cuts the Show Desktop sliver off whichever end of `span` it sits at.
@@ -134,14 +192,15 @@ bool IsProcessRunning(const wchar_t* exeName) {
 Engine* Engine::s_instance = nullptr;
 
 Engine::~Engine() {
+    worker_.Stop();
     Detach();
     RemoveGlobalHooks();
 }
 
-HRESULT Engine::Init(Callbacks callbacks) {
+HRESULT Engine::Init(Callbacks callbacks, HWND notifyWnd, UINT boundsMessage) {
     s_instance = this;
     callbacks_ = std::move(callbacks);
-    return reader_.Init();
+    return worker_.Start(notifyWnd, boundsMessage);
 }
 
 void Engine::SetConfig(const Config& config) {
@@ -307,58 +366,118 @@ Engine::Context Engine::BuildContext() const {
     return ctx;
 }
 
-bool Engine::Update(bool force, bool readBounds) {
-    if (!config_.enabled) return false;
+void Engine::Update(bool force, bool readBounds) {
+    if (!config_.enabled) return;
     const Context ctx = BuildContext();
     log::Debug(L"update force=%d bounds=%d fg=%s shellUi=%d taskSwitch=%d maximisedMonitors=%zu fullscreenMonitors=%zu", force,
                readBounds, ctx.foregroundClass.c_str(), ctx.shellUi, ctx.taskSwitch, ctx.maximised.size(), ctx.fullscreen.size());
-    bool retry = false;
-    for (Taskbar& tb : taskbars_) retry |= UpdateOne(tb, force, readBounds, ctx);
-    return retry;
+    for (Taskbar& tb : taskbars_) {
+        if (readBounds) {
+            worker_.Request(tb.hwnd);
+            if (force) tb.forcePending = true;
+        }
+        if (tb.islands && IsWindow(tb.hwnd)) Layout(tb, force, ctx);
+    }
 }
 
-bool Engine::UpdateOne(Taskbar& tb, bool force, bool readBounds, const Context& ctx) {
-    const std::wstring label = Label(tb.hwnd, tb.primary);
-    if (!IsWindow(tb.hwnd)) {
-        tb.status = L"window gone";
-        return false;
+void Engine::RequestSettlingReads() {
+    for (const Taskbar& tb : taskbars_) {
+        if (tb.settling) worker_.Request(tb.hwnd);
+    }
+}
+
+Engine::UpdateResult Engine::OnBounds(BoundsWorker::Reply* raw) {
+    const std::unique_ptr<BoundsWorker::Reply> reply(raw);
+    UpdateResult result;
+    Taskbar* tb = Find(reply->taskbar);
+    if (!tb || !config_.enabled || !IsWindow(tb->hwnd)) return result;  // e.g. from before a re-attach
+
+    const std::wstring label = Label(tb->hwnd, tb->primary);
+    const BoundsResult& read = reply->result;
+    log::Debug(L"%s: bounds read in %lu ms: %s", label.c_str(), reply->ms,
+               read.islands ? (L"app " + FormatRect(read.islands->app) + L", " + std::to_wstring(read.islands->extras.size()) +
+                               L" extra, tray " + (read.islands->hasTray ? FormatRect(read.islands->tray) : L"-")).c_str()
+                            : read.error.c_str());
+    const bool force = tb->forcePending;
+    tb->forcePending = false;
+
+    if (!read.islands) {
+        ++tb->failures;
+        if (tb->lastError != read.error) {
+            log::Write(L"%s: bounds unavailable: %s", label.c_str(), read.error.c_str());
+            tb->lastError = read.error;
+        }
+        if (tb->applied && tb->failures < kFailuresBeforeUnclip) {
+            result.retry = true;
+            return result;
+        }
+        tb->islands.reset();
+        tb->lastRead.reset();
+        tb->settling = false;
+        if (tb->applied || force) {
+            ClearRegion(tb->hwnd);
+            if (tb->applied) log::Write(L"%s: falling back to unclipped taskbar", label.c_str());
+            tb->applied.reset();
+        }
+        // The custom background (if any) follows the now full-width taskbar.
+        GetWindowRect(tb->hwnd, &tb->wr);
+        tb->dpi = GetDpiForWindow(tb->hwnd) ? GetDpiForWindow(tb->hwnd) : 96;
+        tb->state = tb->logical = kFilled;
+        tb->fillWhenSettled = tb->tweening = false;
+        tb->trimShowDesktop = false;
+        tb->fillSpan = tb->wr;
+        tb->shown.clear();
+        tb->target.clear();
+        SyncLayers(*tb);
+        tb->status = L"unclipped – " + read.error;
+        return result;
     }
 
-    if (readBounds || !tb.islands) {
-        const DWORD start = GetTickCount();
-        const BoundsResult result = reader_.Compute(tb.hwnd);
-        log::Debug(L"%s: bounds read in %lu ms: %s", label.c_str(), GetTickCount() - start,
-                   result.islands ? (L"app " + FormatRect(result.islands->app) + L", " + std::to_wstring(result.islands->extras.size()) +
-                                     L" extra, tray " + (result.islands->hasTray ? FormatRect(result.islands->tray) : L"-")).c_str()
-                                  : result.error.c_str());
-        if (!result.islands) {
-            ++tb.failures;
-            if (tb.lastError != result.error) {
-                log::Write(L"%s: bounds unavailable: %s", label.c_str(), result.error.c_str());
-                tb.lastError = result.error;
-            }
-            if (tb.applied && tb.failures < kFailuresBeforeUnclip) return true;
-            tb.islands.reset();
-            if (tb.applied || force) {
-                ClearRegion(tb.hwnd);
-                if (tb.applied) log::Write(L"%s: falling back to unclipped taskbar", label.c_str());
-                tb.applied.reset();
-            }
-            // The custom background (if any) follows the now full-width taskbar.
-            GetWindowRect(tb.hwnd, &tb.wr);
-            tb.dpi = GetDpiForWindow(tb.hwnd) ? GetDpiForWindow(tb.hwnd) : 96;
-            tb.state = kFilled;
-            tb.trimShowDesktop = false;
-            tb.shown = tb.target = {tb.wr};
-            SyncLayers(tb);
-            tb.status = L"unclipped – " + result.error;
-            return false;
+    tb->failures = 0;
+    tb->lastError.clear();
+    tb->islands = *read.islands;
+    result.reread = Settle(*tb, *read.islands);
+    Layout(*tb, force, BuildContext());
+    return result;
+}
+
+bool Engine::Settle(Taskbar& tb, const Islands& fresh) {
+    constexpr int kStableReadsToSettle = 2;
+    constexpr DWORD kMaxSettleMs = 1500;  // never wait longer than this for explorer
+    const DWORD now = GetTickCount();
+    const bool first = !tb.lastRead;
+    const bool changed = first || !SameIslands(fresh, *tb.lastRead);
+    tb.lastRead = fresh;
+
+    if (first || !config_.animate) {
+        tb.settling = false;
+        tb.display = fresh;
+    } else if (changed) {
+        if (!tb.settling) {
+            tb.settling = true;
+            tb.settleStart = now;
         }
-        tb.failures = 0;
-        tb.lastError.clear();
-        tb.islands = *result.islands;
+        tb.stableReads = 0;
+        tb.display = Merged(tb.display, fresh);
+    } else if (tb.settling) {
+        if (++tb.stableReads >= kStableReadsToSettle) tb.settling = false;
+        tb.display = tb.settling ? Merged(tb.display, fresh) : fresh;
+    } else {
+        tb.display = fresh;
     }
-    const Islands& is = *tb.islands;
+    if (tb.settling && now - tb.settleStart > kMaxSettleMs) {
+        tb.settling = false;
+        tb.display = fresh;
+    }
+    return tb.settling;
+}
+
+void Engine::Layout(Taskbar& tb, bool force, const Context& ctx) {
+    const std::wstring label = Label(tb.hwnd, tb.primary);
+    // Shape decisions use the settled view; the sliver comes from the latest reading.
+    Islands is = tb.lastRead ? tb.display : *tb.islands;
+    is.hasShowDesktop = tb.islands->hasShowDesktop;
+    is.showDesktop = tb.islands->showDesktop;
 
     RECT wr = {};
     GetWindowRect(tb.hwnd, &wr);
@@ -400,23 +519,21 @@ bool Engine::UpdateOne(Taskbar& tb, bool force, bool readBounds, const Context& 
         why = L"window maximised";
     }
 
-    std::vector<RECT> spans;
+    // The islands this taskbar would show in islands mode. They are also the
+    // start/end point of the morph to and from full width.
+    const RECT fillSpan = trimShowDesktop ? WithoutShowDesktop(wr, is) : wr;
+    std::vector<Span> islands;
     bool trayShown = false;
-    if (state == kFilled) {
-        // One full-height span; only used for the backdrop and the key.
-        spans.push_back(trimShowDesktop ? WithoutShowDesktop(wr, is) : wr);
-    } else if (state == kShapes) {
-        if (config_.mode == LayoutMode::Bar) {
-            const RECT bar = {wr.left + padding, wr.top, wr.right - padding, wr.bottom};
-            spans.push_back(trimShowDesktop ? WithoutShowDesktop(bar, is) : bar);
-        } else {
-            spans.push_back(Padded(is.app, padding));
-            if (config_.showWidgets) {
-                for (const RECT& extra : is.extras) spans.push_back(Padded(extra, padding));
-            }
-            trayShown = is.hasTray && (config_.trayMode == TrayMode::Show || (config_.trayMode == TrayMode::Hover && revealed));
-            if (trayShown) spans.push_back(Padded(is.tray, padding));
+    if (config_.mode == LayoutMode::Bar) {
+        const RECT bar = {wr.left + padding, wr.top, wr.right - padding, wr.bottom};
+        islands.push_back({trimShowDesktop ? WithoutShowDesktop(bar, is) : bar, kIdBar});
+    } else {
+        islands.push_back({Padded(is.app, padding), kIdApp});
+        if (config_.showWidgets) {
+            for (size_t i = 0; i < is.extras.size(); ++i) islands.push_back({Padded(is.extras[i], padding), kIdExtra + static_cast<int>(i)});
         }
+        trayShown = is.hasTray && (config_.trayMode == TrayMode::Show || (config_.trayMode == TrayMode::Hover && revealed));
+        if (trayShown) islands.push_back({Padded(is.tray, padding), kIdTray});
     }
 
     switch (state) {
@@ -426,43 +543,121 @@ bool Engine::UpdateOne(Taskbar& tb, bool force, bool readBounds, const Context& 
             if (config_.mode == LayoutMode::Bar) {
                 tb.status = L"single bar";
             } else {
-                tb.status = std::to_wstring(is.appCount) + L" app buttons [" + Span(is.app) + L"]";
+                tb.status = std::to_wstring(is.appCount) + L" app buttons [" + SpanText(is.app) + L"]";
                 if (!is.extras.empty()) tb.status += L", +" + std::to_wstring(is.extras.size()) + (config_.showWidgets ? L" extra" : L" extra hidden");
-                if (is.hasTray) tb.status += L", tray [" + Span(is.tray) + L"]" + (trayShown ? L"" : L" hidden");
+                if (is.hasTray) tb.status += L", tray [" + SpanText(is.tray) + L"]" + (trayShown ? L"" : L" hidden");
             }
     }
 
-    // Only islands in the same state animate; anything else (first frame, state
-    // change, islands appearing or disappearing, resolution change) snaps.
-    const bool stateChanged = !tb.applied || tb.state != state;
-    const bool targetChanged = stateChanged || !SameSpans(tb.target, spans);
-    const bool snap = force || stateChanged || !config_.animate || state != kShapes || tb.shown.size() != spans.size() ||
-                      !EqualRect(&tb.wr, &wr) || tb.dpi != dpi;
-    tb.state = state;
+    // Animate between islands and full width on an unchanged screen; everything
+    // else (first frame, hidden, forced refresh, DPI or resolution change) snaps.
+    const bool logicalChanged = tb.logical != state;
+    const bool canAnimate = config_.animate && !force && tb.applied && EqualRect(&tb.wr, &wr) && tb.dpi == dpi;
+    const std::vector<Span> previousTarget = tb.target;
     tb.wr = wr;
-    tb.style = style;
     tb.dpi = dpi;
     tb.trimShowDesktop = trimShowDesktop;
     tb.showDesktop = is.showDesktop;
-    tb.target = std::move(spans);
-    if (snap) tb.shown = tb.target;
+    tb.fillSpan = fillSpan;
+    constexpr SpanStyle kFlat{0, 0, 0};
+
+    if (state == kHidden) {
+        tb.state = kHidden;
+        tb.fillWhenSettled = tb.tweening = false;
+        tb.shown.clear();
+        tb.target.clear();
+    } else if (state == kFilled) {
+        tb.target = Expanded(islands, fillSpan);
+        tb.targetStyle = kFlat;
+        if (canAnimate && tb.state == kShapes) {
+            // Morph out: stretch the islands edge to edge and flatten them, then
+            // hand over to the real full-width taskbar when the tween ends.
+            tb.fillWhenSettled = true;
+            Retarget(tb, false);
+        } else {
+            tb.state = kFilled;
+            tb.fillWhenSettled = false;
+            Retarget(tb, true);
+        }
+    } else {
+        const bool snap = !canAnimate || tb.state == kHidden;
+        if (!snap && tb.state == kFilled) {
+            // Morph in: start from the stretched, flat islands.
+            tb.shown = Expanded(islands, fillSpan);
+            tb.style = kFlat;
+            tb.tweening = false;
+        }
+        tb.state = kShapes;
+        tb.fillWhenSettled = false;
+        tb.target = islands;
+        tb.targetStyle = style;
+        Retarget(tb, snap);
+    }
+    tb.logical = state;
     Present(tb, force);
 
-    if (state == kShapes && targetChanged) {
-        log::Write(L"%s: app=%s (%d) extras=%zu tray=%s dpi=%u", label.c_str(), FormatRect(is.app).c_str(), is.appCount,
-                   is.extras.size(), trayShown ? FormatRect(is.tray).c_str() : L"-", dpi);
-    } else if (stateChanged) {
+    if (state == kShapes && (logicalChanged || !SameSpans(previousTarget, tb.target))) {
+        log::Write(L"%s: app=%s (%d) extras=%zu tray=%s dpi=%u%s", label.c_str(), FormatRect(is.app).c_str(), is.appCount,
+                   is.extras.size(), trayShown ? FormatRect(is.tray).c_str() : L"-", dpi, tb.settling ? L" (settling)" : L"");
+    } else if (logicalChanged) {
         log::Write(L"%s: %s", label.c_str(), tb.status.c_str());
     }
-    return false;
+}
+
+void Engine::Retarget(Taskbar& tb, bool snap) {
+    if (snap) {
+        tb.shown = tb.target;
+        tb.style = tb.targetStyle;
+        tb.tweening = false;
+        return;
+    }
+    // Already on the way there (or there)? Then keep going undisturbed.
+    std::vector<Span> heading;
+    for (const Span& s : tb.to) {
+        if (FindSpan(tb.target, s.id)) heading.push_back(s);
+    }
+    if (tb.tweening && SameSpans(heading, tb.target) && SameStyle(tb.toStyle, tb.targetStyle)) return;
+    if (!tb.tweening && SameSpans(tb.shown, tb.target) && SameStyle(tb.style, tb.targetStyle)) return;
+
+    // New tween from exactly what is on screen now. Islands that appear grow out
+    // of their centre; islands that go away shrink into theirs.
+    tb.from = tb.shown;
+    tb.fromStyle = tb.style;
+    tb.to = tb.target;
+    tb.toStyle = tb.targetStyle;
+    for (const Span& t : tb.target) {
+        if (FindSpan(tb.from, t.id)) continue;
+        const LONG c = (t.rect.left + t.rect.right) / 2;
+        tb.from.push_back({{c, t.rect.top, c, t.rect.bottom}, t.id});
+    }
+    for (const Span& f : tb.from) {
+        if (FindSpan(tb.to, f.id)) continue;
+        const LONG c = (f.rect.left + f.rect.right) / 2;
+        tb.to.push_back({{c, f.rect.top, c, f.rect.bottom}, f.id});
+    }
+
+    // Constant speed: the duration follows the longest edge move.
+    LONG distance = 0;
+    for (const Span& f : tb.from) {
+        const Span* t = FindSpan(tb.to, f.id);
+        distance = std::max({distance, std::abs(t->rect.left - f.rect.left), std::abs(t->rect.right - f.rect.right)});
+    }
+    distance = std::max({distance, static_cast<LONG>(std::abs(tb.toStyle.marginTop - tb.fromStyle.marginTop)),
+                         static_cast<LONG>(std::abs(tb.toStyle.marginBottom - tb.fromStyle.marginBottom)),
+                         static_cast<LONG>(std::abs(tb.toStyle.radius - tb.fromStyle.radius))});
+    tb.tweenDuration = std::clamp(distance * kTweenMsPerPixel, kMinTweenMs, kMaxTweenMs);
+    tb.tweenStart = NowMs();
+    tb.tweening = true;
 }
 
 void Engine::Present(Taskbar& tb, bool force) {
     SyncLayers(tb);
 
     Key key = {tb.state, tb.wr.left, tb.wr.top, tb.wr.right, tb.wr.bottom, tb.style.marginTop, tb.style.marginBottom, tb.style.radius,
-               tb.trimShowDesktop ? 1 : 0};
-    for (const RECT& s : tb.shown) key.insert(key.end(), {s.left, s.right});
+               tb.trimShowDesktop ? 1 : 0, tb.fillSpan.left, tb.fillSpan.right};
+    if (tb.state == kShapes) {
+        for (const Span& s : tb.shown) key.insert(key.end(), {s.id, s.rect.left, s.rect.right});
+    }
 
     // Something else removed our region while the state stayed the same.
     const bool regionLost = tb.state != kFilled && tb.applied && (*tb.applied)[0] == tb.state && !HasRegion(tb.hwnd);
@@ -475,7 +670,14 @@ void Engine::Present(Taskbar& tb, bool force) {
             else ClearRegion(tb.hwnd);
             break;
         case kHidden: ok = HideTaskbar(tb.hwnd); break;
-        default: ok = ApplySpans(tb.hwnd, tb.wr, tb.shown, tb.style); break;
+        default: {
+            std::vector<RECT> rects;
+            for (const Span& s : tb.shown) {
+                if (s.rect.right > s.rect.left) rects.push_back(s.rect);
+            }
+            ok = ApplySpans(tb.hwnd, tb.wr, rects, tb.style);
+            break;
+        }
     }
     if (!ok) {
         log::Write(L"%s: SetWindowRgn failed (%lu)", Label(tb.hwnd, tb.primary).c_str(), GetLastError());
@@ -501,50 +703,64 @@ void Engine::SyncLayers(Taskbar& tb) {
     std::vector<RECT> shapes;
     int radius = tb.style.radius;
     if (tb.state == kFilled) {
-        const RECT full = tb.shown.empty() ? tb.wr : tb.shown.front();
-        shapes.push_back({full.left - tb.wr.left, 0, full.right - tb.wr.left, tb.wr.bottom - tb.wr.top});
+        shapes.push_back({tb.fillSpan.left - tb.wr.left, 0, tb.fillSpan.right - tb.wr.left, tb.wr.bottom - tb.wr.top});
         radius = 0;
     } else if (tb.state == kShapes) {
-        for (const RECT& span : tb.shown) shapes.push_back(SpanToWindowRect(tb.wr, span, tb.style));
+        for (const Span& s : tb.shown) {
+            if (s.rect.right > s.rect.left) shapes.push_back(SpanToWindowRect(tb.wr, s.rect, tb.style));
+        }
     }
 
-    auto sync = [&](std::unique_ptr<Backdrop>& layer, bool wanted, Backdrop::Layer kind, const std::vector<RECT>& layerShapes) {
+    auto sync = [&](std::unique_ptr<Backdrop>& layer, bool wanted, Backdrop::Layer kind) {
         if (!wanted) {
             layer.reset();
             return;
         }
         if (!layer) layer = std::make_unique<Backdrop>(kind);
-        if (layerShapes.empty()) layer->Hide();
-        else layer->Show(tb.hwnd, tb.wr, layerShapes, radius, config_, tb.dpi);
+        if (shapes.empty()) layer->Hide();
+        else layer->Show(tb.hwnd, tb.wr, shapes, radius, config_, tb.dpi);
     };
-    sync(tb.fill, config_.background != Background::Default && FillVisible(), Backdrop::Layer::Fill, shapes);
-    // A full-width taskbar is the normal Windows look: no outline.
-    sync(tb.border, BorderActive(), Backdrop::Layer::Border, tb.state == kShapes ? shapes : std::vector<RECT>{});
+    sync(tb.fill, config_.background != Background::Default && FillVisible(), Backdrop::Layer::Fill);
+    // The border stays on at full width too, so the morph ends without a pop.
+    sync(tb.border, BorderActive(), Backdrop::Layer::Border);
 }
 
 bool Engine::Animating() const {
     for (const Taskbar& tb : taskbars_) {
-        if (!SameSpans(tb.shown, tb.target)) return true;
+        if (tb.tweening) return true;
     }
     return false;
 }
 
-bool Engine::Animate() {
-    bool moving = false;
+void Engine::Animate() {
+    const double now = NowMs();
     for (Taskbar& tb : taskbars_) {
-        if (SameSpans(tb.shown, tb.target)) continue;
-        if (tb.shown.size() != tb.target.size()) {
+        if (!tb.tweening) continue;
+        const double p = std::clamp((now - tb.tweenStart) / tb.tweenDuration, 0.0, 1.0);
+        if (p >= 1.0) {
+            tb.tweening = false;
             tb.shown = tb.target;
-        } else {
-            for (size_t i = 0; i < tb.shown.size(); ++i) {
-                Approach(tb.shown[i].left, tb.target[i].left);
-                Approach(tb.shown[i].right, tb.target[i].right);
+            tb.style = tb.targetStyle;
+            // Stretched edge to edge and flat: now it is the full-width taskbar.
+            if (tb.fillWhenSettled) {
+                tb.state = kFilled;
+                tb.fillWhenSettled = false;
             }
+        } else {
+            tb.shown.clear();
+            for (const Span& f : tb.from) {
+                const Span* t = FindSpan(tb.to, f.id);
+                RECT r = f.rect;
+                r.left = Lerp(f.rect.left, t->rect.left, p);
+                r.right = Lerp(f.rect.right, t->rect.right, p);
+                tb.shown.push_back({r, f.id});
+            }
+            tb.style.marginTop = Lerp(tb.fromStyle.marginTop, tb.toStyle.marginTop, p);
+            tb.style.marginBottom = Lerp(tb.fromStyle.marginBottom, tb.toStyle.marginBottom, p);
+            tb.style.radius = Lerp(tb.fromStyle.radius, tb.toStyle.radius, p);
         }
         Present(tb, false);
-        moving |= !SameSpans(tb.shown, tb.target);
     }
-    return moving;
 }
 
 void Engine::ClearAll() {
@@ -555,8 +771,19 @@ void Engine::ClearAll() {
         tb.border.reset();
         tb.shown.clear();
         tb.target.clear();
+        tb.lastRead.reset();
+        tb.logical = -1;
+        tb.state = kShapes;
+        tb.fillWhenSettled = tb.tweening = tb.settling = false;
     }
     ClearAllTaskbars();
+}
+
+Engine::Taskbar* Engine::Find(HWND hwnd) {
+    for (Taskbar& tb : taskbars_) {
+        if (tb.hwnd == hwnd) return &tb;
+    }
+    return nullptr;
 }
 
 std::vector<MonitorEntry> Engine::Monitors() const {

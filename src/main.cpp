@@ -7,6 +7,7 @@
 
 #include <windows.h>
 #include <commctrl.h>
+#include <dwmapi.h>
 #include <shellapi.h>
 #include <windowsx.h>
 
@@ -36,12 +37,13 @@ constexpr wchar_t kRunValue[] = L"FloatBar";
 
 constexpr UINT WM_APP_TRAY = WM_APP + 1;
 constexpr UINT WM_APP_SHOW_SETTINGS = WM_APP + 2;
+constexpr UINT WM_APP_BOUNDS = WM_APP + 3;  // a BoundsWorker::Reply* in lParam
 
-enum TimerId : UINT_PTR { kTimerDebounce = 1, kTimerPoll, kTimerSave, kTimerSettle, kTimerHover, kTimerAnimate };
-constexpr UINT kFrameMs = 16;          // animation frame (~60 fps), only while islands move
+enum TimerId : UINT_PTR { kTimerDebounce = 1, kTimerPoll, kTimerSave, kTimerSettle, kTimerHover, kTimerSettleRead, kTimerRetry };
 constexpr UINT kDebounceMs = 100;      // taskbar content changed
 constexpr UINT kWindowEventMs = 30;    // other windows changed (maximise, foreground)
 constexpr UINT kRetryMs = 150;
+constexpr UINT kSettleReadMs = 60;     // re-read cadence while explorer relayouts the buttons
 constexpr UINT kHoverPollMs = 50;
 constexpr UINT kPollMs = 1000;         // safety net in case an event was missed
 
@@ -82,8 +84,14 @@ void RunUpdate(bool force, bool readBounds = true) {
         force = readBounds = true;
         fb::settings::RefreshControls();  // the monitor list may have changed
     }
-    if (g_engine->Update(force, readBounds)) ScheduleUpdate(true, kRetryMs);
-    if (g_engine->Animating()) SetTimer(g_mainWnd, kTimerAnimate, kFrameMs, nullptr);
+    g_engine->Update(force, readBounds);  // fresh bounds arrive later as WM_APP_BOUNDS
+    fb::settings::RefreshStatus();
+}
+
+void OnBounds(fb::BoundsWorker::Reply* reply) {
+    const fb::Engine::UpdateResult result = g_engine->OnBounds(reply);
+    if (result.reread) SetTimer(g_mainWnd, kTimerSettleRead, kSettleReadMs, nullptr);
+    if (result.retry) SetTimer(g_mainWnd, kTimerRetry, kRetryMs, nullptr);
     fb::settings::RefreshStatus();
 }
 
@@ -183,8 +191,13 @@ LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
                 case kTimerHover:
                     if (g_engine->PollHover()) RunUpdate(false, false);
                     break;
-                case kTimerAnimate:
-                    if (!g_engine->Animate()) KillTimer(hwnd, kTimerAnimate);
+                case kTimerSettleRead:
+                    KillTimer(hwnd, kTimerSettleRead);
+                    g_engine->RequestSettlingReads();
+                    break;
+                case kTimerRetry:
+                    KillTimer(hwnd, kTimerRetry);
+                    g_engine->Update(false, true);
                     break;
                 case kTimerPoll:
                     RunUpdate(false);
@@ -211,6 +224,10 @@ LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
                     ShowTrayMenu(GET_X_LPARAM(wParam), GET_Y_LPARAM(wParam));
                     break;
             }
+            return 0;
+
+        case WM_APP_BOUNDS:
+            OnBounds(reinterpret_cast<fb::BoundsWorker::Reply*>(lParam));
             return 0;
 
         case WM_APP_SHOW_SETTINGS:
@@ -260,6 +277,33 @@ LONG WINAPI CrashFilter(EXCEPTION_POINTERS*) {
     fb::ClearAllTaskbars();
     fb::log::Write(L"unhandled exception, regions cleared");
     return EXCEPTION_CONTINUE_SEARCH;
+}
+
+void Dispatch(MSG& msg) {
+    HWND settings = fb::settings::Window();
+    if (settings && IsDialogMessageW(settings, &msg)) return;
+    TranslateMessage(&msg);
+    DispatchMessageW(&msg);
+}
+
+// Idle: block in GetMessage. While islands move: drain messages, draw the frame
+// for "now", then wait for the next display refresh (DwmFlush), so motion is
+// updated exactly once per refresh at any refresh rate.
+void RunMessageLoop() {
+    MSG msg;
+    for (;;) {
+        if (!g_engine->Animating()) {
+            if (GetMessageW(&msg, nullptr, 0, 0) <= 0) return;
+            Dispatch(msg);
+            continue;
+        }
+        while (PeekMessageW(&msg, nullptr, 0, 0, PM_REMOVE)) {
+            if (msg.message == WM_QUIT) return;
+            Dispatch(msg);
+        }
+        g_engine->Animate();
+        if (FAILED(DwmFlush())) Sleep(1);
+    }
 }
 
 // Writes the full (unredacted) tree for local diagnosis.
@@ -370,7 +414,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
         fb::Engine::Callbacks callbacks;
         callbacks.taskbarChanged = [] { ScheduleUpdate(true); };
         callbacks.windowsChanged = [] { ScheduleUpdate(false, kWindowEventMs); };
-        if (FAILED(engine.Init(std::move(callbacks)))) {
+        if (FAILED(engine.Init(std::move(callbacks), g_mainWnd, WM_APP_BOUNDS))) {
             MessageBoxW(nullptr, L"Could not initialize UI Automation.", L"FloatBar", MB_ICONERROR);
             exitCode = 1;
         } else {
@@ -385,13 +429,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
             AddTrayIcon();
             if (!background) ShowSettings();
 
-            MSG msg;
-            while (GetMessageW(&msg, nullptr, 0, 0) > 0) {
-                HWND settings = fb::settings::Window();
-                if (settings && IsDialogMessageW(settings, &msg)) continue;
-                TranslateMessage(&msg);
-                DispatchMessageW(&msg);
-            }
+            RunMessageLoop();
             engine.Detach();
             engine.ClearAll();
             fb::log::Write(L"---- FloatBar exiting, regions cleared");

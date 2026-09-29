@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  SignPath artifact configuration for FloatBar. Paste this into the SignPath
+  project (Artifact Configurations). The release workflow uploads floatbar.exe
+  with actions/upload-artifact, which GitHub wraps in a zip, so the root is a
+  zip-file. Only a floatbar.exe whose version resource says ProductName
+  "FloatBar" gets signed.
+-->
+<artifact-configuration xmlns="http://signpath.io/artifact-configuration/v1">
+  <zip-file>
+    <pe-file path="floatbar.exe" product-name="FloatBar">
+      <authenticode-sign />
+    </pe-file>
+  </zip-file>
+</artifact-configuration>
