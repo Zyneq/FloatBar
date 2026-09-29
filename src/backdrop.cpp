@@ -1,13 +1,13 @@
-#include "islandbar/backdrop.h"
+#include "backdrop.h"
 
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
 
-namespace ib {
+namespace fb {
 namespace {
 
-constexpr wchar_t kClassName[] = L"IslandBarBackdrop";
+constexpr wchar_t kClassName[] = L"FloatBarBackdrop";
 
 // Signed distance from a point to a rounded rectangle (negative inside).
 float RoundRectDistance(float px, float py, const RECT& r, float radius) {
@@ -158,4 +158,4 @@ void Backdrop::Render(const RECT& windowRect, const std::vector<RECT>& shapes, i
     ReleaseDC(nullptr, screen);
 }
 
-}  // namespace ib
+}  // namespace fb

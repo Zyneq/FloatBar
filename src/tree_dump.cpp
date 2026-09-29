@@ -1,4 +1,4 @@
-#include "core/tree_dump.h"
+#include "tree_dump.h"
 
 #include <windows.h>
 #include <UIAutomation.h>
@@ -8,12 +8,13 @@
 #include <set>
 #include <vector>
 
-#include "common/uia_util.h"
-#include "core/region.h"
+#include "bounds.h"
+#include "region.h"
+#include "uia_util.h"
 
 using Microsoft::WRL::ComPtr;
 
-namespace ib {
+namespace fb {
 namespace {
 
 constexpr int kMaxDepth = 40;
@@ -219,6 +220,29 @@ std::wstring DescribeEnvironment() {
     return s;
 }
 
-std::wstring DumpTaskbarTrees(bool includeNames) { return DescribeEnvironment() + Dumper(includeNames).Run(); }
+// What FloatBar computes from the trees above, one line per taskbar.
+std::wstring ComputedIslands() {
+    BoundsReader reader;
+    if (FAILED(reader.Init())) return L"BoundsReader::Init failed\r\n";
+    std::wstring out;
+    for (HWND taskbar : FindTaskbars()) {
+        const BoundsResult r = reader.Compute(taskbar);
+        out += FormatHwnd(taskbar) + L" " + WindowClass(taskbar) + L": ";
+        if (!r.islands) {
+            out += L"NO ISLANDS (" + r.error + L")\r\n";
+            continue;
+        }
+        out += L"app=" + FormatRect(r.islands->app) + L" (" + std::to_wstring(r.islands->appCount) + L" buttons)";
+        for (const RECT& e : r.islands->extras) out += L"  extra=" + FormatRect(e);
+        out += r.islands->hasTray ? L"  tray=" + FormatRect(r.islands->tray) : L"  tray=none";
+        if (r.islands->hasShowDesktop) out += L"  showDesktop=" + FormatRect(r.islands->showDesktop);
+        out += L"\r\n";
+    }
+    return out;
+}
 
-}  // namespace ib
+std::wstring DumpTaskbarTrees(bool includeNames) {
+    return DescribeEnvironment() + Dumper(includeNames).Run() + L"\r\n===== computed islands =====\r\n" + ComputedIslands();
+}
+
+}  // namespace fb

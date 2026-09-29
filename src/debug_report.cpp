@@ -1,4 +1,4 @@
-#include "islandbar/debug_report.h"
+#include "debug_report.h"
 
 #include <shellapi.h>
 
@@ -6,22 +6,27 @@
 #include <sstream>
 #include <vector>
 
-#include "common/uia_util.h"
-#include "common/version.h"
-#include "core/config.h"
-#include "core/log.h"
-#include "core/tree_dump.h"
+#include "uia_util.h"
+#include "version.h"
+#include "config.h"
+#include "log.h"
+#include "tree_dump.h"
 
-namespace ib {
+namespace fb {
 namespace {
 
 constexpr size_t kLogLines = 400;
 
-std::wstring ReadUtf8File(const std::wstring& path) {
+// log.txt is UTF-8; config.ini is UTF-16 with a BOM.
+std::wstring ReadTextFile(const std::wstring& path) {
     std::ifstream file(path, std::ios::binary);
     std::stringstream buffer;
     buffer << file.rdbuf();
-    return FromUtf8(buffer.str());
+    const std::string bytes = buffer.str();
+    if (bytes.size() >= 2 && static_cast<unsigned char>(bytes[0]) == 0xFF && static_cast<unsigned char>(bytes[1]) == 0xFE) {
+        return std::wstring(reinterpret_cast<const wchar_t*>(bytes.data() + 2), (bytes.size() - 2) / sizeof(wchar_t));
+    }
+    return FromUtf8(bytes);
 }
 
 std::wstring LastLines(const std::wstring& text, size_t count) {
@@ -66,26 +71,26 @@ std::wstring Timestamp(bool forFileName) {
 void CreateDebugReport(HWND owner, const std::wstring& status) {
     const int consent = MessageBoxW(
         owner,
-        L"IslandBar will create a text file you can attach to a GitHub issue. It contains:\n\n"
-        L"• IslandBar version, Windows build, DPI and monitor layout\n"
-        L"• your IslandBar settings (config.json)\n"
+        L"FloatBar will create a text file you can attach to a GitHub issue. It contains:\n\n"
+        L"• FloatBar version, Windows build, DPI and monitor layout\n"
+        L"• your FloatBar settings (config.ini)\n"
         L"• the taskbar's UI structure: element types, class names, IDs and positions\n"
         L"• the last 400 lines of log.txt\n\n"
         L"Removed before saving: element names (window titles, app names, tray tooltips such as "
         L"Wi-Fi network names), app IDs of taskbar buttons, your user name, computer name and profile path.\n\n"
-        L"Nothing is uploaded. The file is saved in the IslandBar config folder so you can read it "
+        L"Nothing is uploaded. The file is saved in the FloatBar config folder so you can read it "
         L"before deciding to share it.\n\nCreate the debug report?",
-        L"IslandBar – debug report", MB_YESNO | MB_ICONQUESTION | MB_DEFBUTTON2);
+        L"FloatBar – debug report", MB_YESNO | MB_ICONQUESTION | MB_DEFBUTTON2);
     if (consent != IDYES) return;
 
     std::wstring report;
-    report += L"IslandBar debug report\r\n";
+    report += L"FloatBar debug report\r\n";
     report += L"version: " + std::wstring(kVersion) + L"\r\n";
     report += L"created: " + Timestamp(false) + L"\r\n\r\n";
     report += L"===== status =====\r\n" + status + L"\r\n\r\n";
-    report += L"===== config.json =====\r\n" + ReadUtf8File(ConfigPath()) + L"\r\n";
+    report += L"===== config.ini =====\r\n" + ReadTextFile(ConfigPath()) + L"\r\n";
     report += L"===== taskbar UI Automation tree (names removed) =====\r\n" + DumpTaskbarTrees(false) + L"\r\n";
-    report += L"===== log.txt (last " + std::to_wstring(kLogLines) + L" lines) =====\r\n" + LastLines(ReadUtf8File(log::Path()), kLogLines);
+    report += L"===== log.txt (last " + std::to_wstring(kLogLines) + L" lines) =====\r\n" + LastLines(ReadTextFile(log::Path()), kLogLines);
     Redact(report);
 
     const std::wstring path = ConfigDir() + L"\\debug-report-" + Timestamp(true) + L".txt";
@@ -94,7 +99,7 @@ void CreateDebugReport(HWND owner, const std::wstring& status) {
         const std::string utf8 = "\xEF\xBB\xBF" + Utf8(report);  // BOM so Notepad detects UTF-8
         file.write(utf8.data(), static_cast<std::streamsize>(utf8.size()));
         if (!file.good()) {
-            MessageBoxW(owner, (L"Could not write " + path).c_str(), L"IslandBar", MB_ICONERROR);
+            MessageBoxW(owner, (L"Could not write " + path).c_str(), L"FloatBar", MB_ICONERROR);
             return;
         }
     }
@@ -106,9 +111,9 @@ void CreateDebugReport(HWND owner, const std::wstring& status) {
     if (MessageBoxW(owner,
                     L"The report was saved and is selected in File Explorer. Please open it and check it before sharing.\n\n"
                     L"Open a new GitHub issue now? You can drag the file into the issue.",
-                    L"IslandBar – debug report", MB_YESNO | MB_ICONINFORMATION) == IDYES) {
+                    L"FloatBar – debug report", MB_YESNO | MB_ICONINFORMATION) == IDYES) {
         ShellExecuteW(nullptr, L"open", kIssuesUrl, nullptr, nullptr, SW_SHOWNORMAL);
     }
 }
 
-}  // namespace ib
+}  // namespace fb

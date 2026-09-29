@@ -1,4 +1,4 @@
-#include "core/log.h"
+#include "log.h"
 
 #include <windows.h>
 #include <share.h>
@@ -8,9 +8,9 @@
 #include <cstdio>
 #include <mutex>
 
-#include "common/uia_util.h"
+#include "uia_util.h"
 
-namespace ib::log {
+namespace fb::log {
 namespace {
 
 constexpr long kMaxBytes = 1024 * 1024;
@@ -73,4 +73,4 @@ void Debug(const wchar_t* format, ...) {
     va_end(args);
 }
 
-}  // namespace ib::log
+}  // namespace fb::log

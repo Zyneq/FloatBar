@@ -1,4 +1,6 @@
-#include "islandbar/settings_window.h"
+#include "settings_window.h"
+
+#include "app.h"
 
 #include <commctrl.h>
 #include <commdlg.h>
@@ -7,10 +9,10 @@
 #include <iterator>
 #include <string>
 
-namespace ib::settings {
+namespace fb::settings {
 namespace {
 
-constexpr wchar_t kClassName[] = L"IslandBarSettings";
+constexpr wchar_t kClassName[] = L"FloatBarSettings";
 
 enum ControlId : int {
     kIdHeader = 100,
@@ -121,7 +123,6 @@ const Swatch kSwatches[] = {
 };
 
 HWND g_wnd = nullptr;
-Host g_host;
 HFONT g_font = nullptr;
 HFONT g_sectionFont = nullptr;
 HFONT g_headerFont = nullptr;
@@ -324,7 +325,7 @@ void AddSlider(int id) {
 void CreateControls() {
     const DWORD check = BS_AUTOCHECKBOX | WS_TABSTOP;
     const DWORD swatch = BS_OWNERDRAW | WS_TABSTOP;
-    AddControl(WC_STATICW, L"IslandBar", SS_LEFT, kIdHeader);
+    AddControl(WC_STATICW, L"FloatBar", SS_LEFT, kIdHeader);
     AddControl(WC_BUTTONW, L"Enabled", check, kIdEnabled);
 
     AddControl(WC_STATICW, L"Layout", SS_LEFT, kIdSecLayout);
@@ -371,12 +372,12 @@ void CreateControls() {
     AddControl(WC_STATICW, L"", SS_LEFT | SS_NOPREFIX, kIdStatus);
     AddControl(WC_STATICW,
                L"Changes apply instantly and are saved automatically. Win+F2 toggles the tray island. "
-               L"IslandBar keeps running in the notification area after you close this window.",
+               L"FloatBar keeps running in the notification area after you close this window.",
                SS_LEFT, kIdHint);
     AddControl(WC_BUTTONW, L"Defaults", BS_PUSHBUTTON | WS_TABSTOP, kIdDefaults);
     AddControl(WC_BUTTONW, L"Config folder", BS_PUSHBUTTON | WS_TABSTOP, kIdFolder);
     AddControl(WC_BUTTONW, L"Debug report…", BS_PUSHBUTTON | WS_TABSTOP, kIdDebugReport);
-    AddControl(WC_BUTTONW, L"Exit IslandBar", BS_PUSHBUTTON | WS_TABSTOP, kIdExit);
+    AddControl(WC_BUTTONW, L"Exit FloatBar", BS_PUSHBUTTON | WS_TABSTOP, kIdExit);
     AddControl(WC_BUTTONW, L"Close", BS_DEFPUSHBUTTON | WS_TABSTOP, kIdClose);
 }
 
@@ -406,11 +407,11 @@ void ApplyFromControls(Config c) {
         SetSliderLabel(s, c.*s.field);
     }
     UpdateEnabledStates(c);
-    g_host.setConfig(c);
+    app::SetConfig(c);
     RefreshStatus();
 }
 
-void ApplyFromControls() { ApplyFromControls(g_host.getConfig()); }
+void ApplyFromControls() { ApplyFromControls(app::GetConfig()); }
 
 int SelectedMonitor() {
     const int index = ComboBox_GetCurSel(Item(kIdMonitor));
@@ -419,7 +420,7 @@ int SelectedMonitor() {
 
 void ShowSelectedMonitorMode() {
     const int index = SelectedMonitor();
-    const Config c = g_host.getConfig();
+    const Config c = app::GetConfig();
     const auto it = index < 0 ? c.monitorModes.end() : c.monitorModes.find(g_monitorKeys[index]);
     ComboBox_SetCurSel(Item(kIdMonitorMode), it == c.monitorModes.end() ? 0 : static_cast<int>(it->second));
 }
@@ -429,7 +430,7 @@ void PopulateMonitors() {
     HWND combo = Item(kIdMonitor);
     ComboBox_ResetContent(combo);
     g_monitorKeys.clear();
-    for (const auto& [key, label] : g_host.getMonitors()) {
+    for (const auto& [key, label] : app::Monitors()) {
         g_monitorKeys.push_back(key);
         ComboBox_AddString(combo, label.c_str());
     }
@@ -440,16 +441,16 @@ void PopulateMonitors() {
 void ApplyMonitorMode() {
     const int index = SelectedMonitor();
     if (index < 0) return;
-    Config c = g_host.getConfig();
+    Config c = app::GetConfig();
     const auto mode = static_cast<MonitorMode>(std::max(0, ComboBox_GetCurSel(Item(kIdMonitorMode))));
     if (mode == MonitorMode::Default) c.monitorModes.erase(g_monitorKeys[index]);
     else c.monitorModes[g_monitorKeys[index]] = mode;
-    g_host.setConfig(c);
+    app::SetConfig(c);
     RefreshStatus();
 }
 
 void PickColor(const Swatch& sw) {
-    Config c = g_host.getConfig();
+    Config c = app::GetConfig();
     CHOOSECOLORW cc = {sizeof(cc)};
     cc.hwndOwner = g_wnd;
     cc.rgbResult = c.*sw.field;
@@ -462,7 +463,7 @@ void PickColor(const Swatch& sw) {
 }
 
 void DrawSwatch(const DRAWITEMSTRUCT& di) {
-    const Config c = g_host.getConfig();
+    const Config c = app::GetConfig();
     COLORREF color = RGB(128, 128, 128);
     for (const Swatch& sw : kSwatches) {
         if (static_cast<int>(di.CtlID) == sw.id) color = c.*sw.field;
@@ -491,13 +492,13 @@ void DrawSwatch(const DRAWITEMSTRUCT& di) {
 // foreground window). Ask before turning it on.
 bool ConfirmDebugLogging() {
     return MessageBoxW(g_wnd,
-                       L"Verbose debug logging writes extra detail to log.txt in the IslandBar config folder:\n\n"
+                       L"Verbose debug logging writes extra detail to log.txt in the FloatBar config folder:\n\n"
                        L"• every taskbar update and the button rectangles read\n"
                        L"• the window class and process name of the foreground window\n"
                        L"• which monitors have a maximised window\n\n"
                        L"Nothing is sent anywhere. The log stays on this PC until you delete it or choose to share it. "
                        L"You can turn this off at any time.\n\nEnable verbose debug logging?",
-                       L"IslandBar – debug logging", MB_YESNO | MB_ICONQUESTION | MB_DEFBUTTON2) == IDYES;
+                       L"FloatBar – debug logging", MB_YESNO | MB_ICONQUESTION | MB_DEFBUTTON2) == IDYES;
 }
 
 LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
@@ -527,33 +528,32 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                     if (code == CBN_SELCHANGE) ApplyMonitorMode();
                     return 0;
                 case kIdAutostart:
-                    if (code == BN_CLICKED) g_host.setAutostart(Button_GetCheck(Item(kIdAutostart)) == BST_CHECKED);
+                    if (code == BN_CLICKED) app::SetAutostart(Button_GetCheck(Item(kIdAutostart)) == BST_CHECKED);
                     return 0;
                 case kIdDebugLogging:
                     if (code == BN_CLICKED) {
-                        Config c = g_host.getConfig();
+                        Config c = app::GetConfig();
                         const bool want = Button_GetCheck(Item(kIdDebugLogging)) == BST_CHECKED;
                         c.debugLogging = want && ConfirmDebugLogging();
                         Button_SetCheck(Item(kIdDebugLogging), c.debugLogging ? BST_CHECKED : BST_UNCHECKED);
-                        g_host.setConfig(c);
+                        app::SetConfig(c);
                     }
                     return 0;
                 case kIdDefaults: {
                     Config defaults;
-                    defaults.pollIntervalMs = g_host.getConfig().pollIntervalMs;
-                    defaults.debugLogging = g_host.getConfig().debugLogging;
-                    g_host.setConfig(defaults);
+                    defaults.debugLogging = app::GetConfig().debugLogging;
+                    app::SetConfig(defaults);
                     RefreshControls();
                     return 0;
                 }
                 case kIdFolder:
-                    g_host.openConfigFolder();
+                    app::OpenConfigFolder();
                     return 0;
                 case kIdDebugReport:
-                    g_host.createDebugReport();
+                    app::CreateDebugReport();
                     return 0;
                 case kIdExit:
-                    g_host.exitApp();
+                    app::Exit();
                     return 0;
                 case kIdClose:
                 case IDCANCEL:
@@ -593,8 +593,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
 
 }  // namespace
 
-void Show(HINSTANCE instance, const Host& host, HICON smallIcon, HICON largeIcon) {
-    g_host = host;
+void Show(HINSTANCE instance, HICON smallIcon, HICON largeIcon) {
     if (g_wnd) {
         ShowWindow(g_wnd, SW_SHOWNORMAL);
         SetForegroundWindow(g_wnd);
@@ -614,7 +613,7 @@ void Show(HINSTANCE instance, const Host& host, HICON smallIcon, HICON largeIcon
         registered = RegisterClassExW(&wc) != 0;
     }
 
-    g_wnd = CreateWindowExW(WS_EX_CONTROLPARENT, kClassName, L"IslandBar Settings",
+    g_wnd = CreateWindowExW(WS_EX_CONTROLPARENT, kClassName, L"FloatBar Settings",
                             WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX, CW_USEDEFAULT, CW_USEDEFAULT, 400,
                             600, nullptr, nullptr, instance, nullptr);
     if (!g_wnd) return;
@@ -630,9 +629,9 @@ void Show(HINSTANCE instance, const Host& host, HICON smallIcon, HICON largeIcon
 
 void RefreshControls() {
     if (!g_wnd) return;
-    const Config c = g_host.getConfig();
+    const Config c = app::GetConfig();
     for (const Check& ch : kChecks) Button_SetCheck(Item(ch.id), c.*ch.field ? BST_CHECKED : BST_UNCHECKED);
-    Button_SetCheck(Item(kIdAutostart), g_host.getAutostart() ? BST_CHECKED : BST_UNCHECKED);
+    Button_SetCheck(Item(kIdAutostart), app::IsAutostartEnabled() ? BST_CHECKED : BST_UNCHECKED);
     Button_SetCheck(Item(kIdDebugLogging), c.debugLogging ? BST_CHECKED : BST_UNCHECKED);
     ComboBox_SetCurSel(Item(kIdMode), c.mode == LayoutMode::Bar ? 1 : 0);
     ComboBox_SetCurSel(Item(kIdTray), static_cast<int>(c.trayMode));
@@ -650,7 +649,7 @@ void RefreshControls() {
 
 void RefreshStatus() {
     if (!g_wnd) return;
-    const std::wstring status = g_host.getStatus();
+    const std::wstring status = app::Status();
     wchar_t current[2048] = {};
     GetWindowTextW(Item(kIdStatus), current, static_cast<int>(std::size(current)));
     if (status != current) SetWindowTextW(Item(kIdStatus), status.c_str());
@@ -658,4 +657,4 @@ void RefreshStatus() {
 
 HWND Window() { return g_wnd; }
 
-}  // namespace ib::settings
+}  // namespace fb::settings

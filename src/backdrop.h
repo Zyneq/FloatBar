@@ -4,9 +4,9 @@
 
 #include <vector>
 
-#include "core/config.h"
+#include "config.h"
 
-namespace ib {
+namespace fb {
 
 // A click-through layered window kept directly below one taskbar in z-order.
 // It draws antialiased island backgrounds; they only show through when the
@@ -30,4 +30,4 @@ private:
     std::vector<LONG> key_;
 };
 
-}  // namespace ib
+}  // namespace fb

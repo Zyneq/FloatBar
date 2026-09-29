@@ -8,7 +8,7 @@
 #include <string>
 #include <vector>
 
-namespace ib {
+namespace fb {
 
 // Island rectangles in physical screen coordinates.
 struct Islands {
@@ -42,4 +42,4 @@ private:
     Microsoft::WRL::ComPtr<IUIAutomationCacheRequest> cache_;
 };
 
-}  // namespace ib
+}  // namespace fb

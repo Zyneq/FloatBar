@@ -1,9 +1,9 @@
-#include "common/uia_util.h"
+#include "uia_util.h"
 
 #include <cwchar>
 #include <iterator>
 
-namespace ib {
+namespace fb {
 
 std::wstring TakeBstr(BSTR b) {
     std::wstring s = b ? std::wstring(b, SysStringLen(b)) : std::wstring();
@@ -85,4 +85,4 @@ std::wstring Escape(const std::wstring& s) {
     return out;
 }
 
-}  // namespace ib
+}  // namespace fb

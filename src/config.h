@@ -3,7 +3,7 @@
 #include <map>
 #include <string>
 
-namespace ib {
+namespace fb {
 
 enum class LayoutMode {
     Islands,  // app island + tray island (+ widgets), sized to the actual buttons
@@ -17,8 +17,8 @@ enum class TrayMode {
 };
 
 enum class Background {
-    Default,   // whatever Windows draws; IslandBar only clips
-    Solid,     // IslandBar draws antialiased islands (needs TranslucentTB set to Clear)
+    Default,   // whatever Windows draws; FloatBar only clips
+    Solid,     // FloatBar draws antialiased islands (needs TranslucentTB set to Clear)
     Gradient,
 };
 
@@ -47,7 +47,6 @@ struct Config {
     bool hideOverFullscreen = true;  // hide while a fullscreen/borderless app covers the monitor
     bool hideShowDesktop = false;    // clip the Show Desktop sliver in full-width and bar modes too
     std::map<std::wstring, MonitorMode> monitorModes;  // key: monitor device name, e.g. \\.\DISPLAY2
-    int pollIntervalMs = 1000;
 
     // Appearance (colours are COLORREF, 0x00BBGGRR).
     Background background = Background::Default;
@@ -69,13 +68,14 @@ inline constexpr int kMaxMargin = 20;
 inline constexpr int kMaxCornerRadius = 30;
 inline constexpr int kMaxIslandPadding = 40;
 
-// %APPDATA%\IslandBar (created if missing).
+// %APPDATA%\FloatBar (created if missing).
 std::wstring ConfigDir();
 std::wstring ConfigPath();
 
-// Loads config.json, writing defaults if it does not exist. On a parse error
-// returns false, fills `error` and leaves defaults in `out`.
-bool LoadConfig(Config& out, std::wstring& error);
+// %APPDATA%\FloatBar\config.ini, read and written with the Win32 profile API.
+// Missing or invalid values fall back to the defaults above; a missing file is
+// created with defaults.
+Config LoadConfig();
 bool SaveConfig(const Config& config);
 
-}  // namespace ib
+}  // namespace fb

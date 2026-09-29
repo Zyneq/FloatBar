@@ -1,11 +1,11 @@
-#include "islandbar/app_icon.h"
+#include "app_icon.h"
 
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
 #include <vector>
 
-namespace ib {
+namespace fb {
 namespace {
 
 // Antialiased coverage of pixel (px, py) by a rounded rectangle (signed distance field).
@@ -70,4 +70,4 @@ HICON CreateIslandIcon(int size) {
     return icon;
 }
 
-}  // namespace ib
+}  // namespace fb

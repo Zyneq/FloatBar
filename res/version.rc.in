@@ -14,13 +14,13 @@ BEGIN
         BLOCK "040904B0"
         BEGIN
             VALUE "CompanyName",      "Zyneq"
-            VALUE "FileDescription",  "IslandBar - floating split taskbar for Windows 11"
-            VALUE "FileVersion",      "@IB_VERSION@"
-            VALUE "InternalName",     "islandbar"
+            VALUE "FileDescription",  "FloatBar - floating split taskbar for Windows 11"
+            VALUE "FileVersion",      "@FB_VERSION@"
+            VALUE "InternalName",     "floatbar"
             VALUE "LegalCopyright",   "Zyneq. Licensed under CC BY 4.0."
-            VALUE "OriginalFilename", "islandbar.exe"
-            VALUE "ProductName",      "IslandBar (FloatBar)"
-            VALUE "ProductVersion",   "@IB_VERSION@"
+            VALUE "OriginalFilename", "floatbar.exe"
+            VALUE "ProductName",      "FloatBar"
+            VALUE "ProductVersion",   "@FB_VERSION@"
         END
     END
     BLOCK "VarFileInfo"

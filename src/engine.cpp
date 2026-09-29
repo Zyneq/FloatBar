@@ -1,16 +1,16 @@
-#include "islandbar/engine.h"
+#include "engine.h"
 
 #include <dwmapi.h>
 #include <tlhelp32.h>
 
 #include <algorithm>
 
-#include "common/uia_util.h"
-#include "core/log.h"
-#include "core/match_rules.h"
-#include "core/region.h"
+#include "uia_util.h"
+#include "log.h"
+#include "match_rules.h"
+#include "region.h"
 
-namespace ib {
+namespace fb {
 namespace {
 
 // Consecutive failed reads tolerated before falling back to the unclipped
@@ -502,4 +502,4 @@ std::wstring Engine::Status() const {
     return s;
 }
 
-}  // namespace ib
+}  // namespace fb

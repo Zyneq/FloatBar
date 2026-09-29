@@ -1,13 +1,13 @@
-#include "core/bounds.h"
+#include "bounds.h"
 
 #include <algorithm>
 
-#include "common/uia_util.h"
-#include "core/match_rules.h"
+#include "uia_util.h"
+#include "match_rules.h"
 
 using Microsoft::WRL::ComPtr;
 
-namespace ib {
+namespace fb {
 namespace {
 
 bool IsEmptyRect(const RECT& r) { return r.right <= r.left || r.bottom <= r.top; }
@@ -213,4 +213,4 @@ BoundsResult BoundsReader::Compute(HWND taskbar) const {
     return result;
 }
 
-}  // namespace ib
+}  // namespace fb

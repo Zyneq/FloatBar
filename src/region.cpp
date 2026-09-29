@@ -1,8 +1,8 @@
-#include "core/region.h"
+#include "region.h"
 
 #include <algorithm>
 
-namespace ib {
+namespace fb {
 namespace {
 
 constexpr int kMinSpanHeight = 8;
@@ -88,4 +88,4 @@ void ClearAllTaskbars() {
     for (HWND hwnd : FindTaskbars()) ClearRegion(hwnd);
 }
 
-}  // namespace ib
+}  // namespace fb

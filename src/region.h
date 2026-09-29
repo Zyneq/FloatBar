@@ -4,7 +4,7 @@
 
 #include <vector>
 
-namespace ib {
+namespace fb {
 
 // Vertical shape shared by every rounded span, in physical pixels.
 struct SpanStyle {
@@ -36,4 +36,4 @@ bool HasRegion(HWND taskbar);
 // Removes any clip from every taskbar. Safe to call from a crash handler.
 void ClearAllTaskbars();
 
-}  // namespace ib
+}  // namespace fb

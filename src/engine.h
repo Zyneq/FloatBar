@@ -8,12 +8,12 @@
 #include <string>
 #include <vector>
 
-#include "core/bounds.h"
-#include "core/config.h"
-#include "core/region.h"
-#include "islandbar/backdrop.h"
+#include "bounds.h"
+#include "config.h"
+#include "region.h"
+#include "backdrop.h"
 
-namespace ib {
+namespace fb {
 
 // Stable-enough monitor identity for per-monitor settings, e.g. \\.\DISPLAY2.
 std::wstring MonitorKey(HMONITOR monitor);
@@ -104,4 +104,4 @@ private:
     bool switching_ = false;
 };
 
-}  // namespace ib
+}  // namespace fb

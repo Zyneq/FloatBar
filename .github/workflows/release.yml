@@ -39,40 +39,31 @@ jobs:
       - name: Configure
         run: |
           cmake --version
-          cmake -B build -A x64 "-DIB_VERSION=${{ steps.version.outputs.version }}"
+          cmake -B build -A x64 "-DFB_VERSION=${{ steps.version.outputs.version }}"
 
       - name: Build
         run: cmake --build build --config Release
 
-      - name: Package and hash
+      # The release is a single file: floatbar.exe (+ its checksum).
+      - name: Hash
         shell: pwsh
         run: |
-          $v = '${{ steps.version.outputs.version }}' -replace '\+', '-'
-          New-Item -ItemType Directory -Force dist, stage | Out-Null
-          Copy-Item build/Release/islandbar.exe, build/Release/uia-dump.exe dist/
-          Copy-Item dist/*, README.md, LICENSE stage/
-          Compress-Archive -Path stage/* -DestinationPath "dist/IslandBar-$v-win-x64.zip"
-          Push-Location dist
-          # List first: Out-File creates SHA256SUMS.txt before a pipeline would finish enumerating.
-          $files = Get-ChildItem -File | Sort-Object Name
-          $sums = foreach ($f in $files) { "{0}  {1}" -f (Get-FileHash $f.Name -Algorithm SHA256).Hash.ToLower(), $f.Name }
-          $sums | Out-File -Encoding ascii SHA256SUMS.txt
-          Get-Content SHA256SUMS.txt
-          Pop-Location
+          New-Item -ItemType Directory -Force dist | Out-Null
+          Copy-Item build/Release/floatbar.exe dist/
+          $hash = (Get-FileHash dist/floatbar.exe -Algorithm SHA256).Hash.ToLower()
+          "$hash  floatbar.exe" | Out-File -Encoding ascii dist/SHA256SUMS.txt
+          Get-Content dist/SHA256SUMS.txt
 
       - name: Attest build provenance
         if: github.event_name != 'pull_request'
         uses: actions/attest-build-provenance@v2
         with:
-          subject-path: |
-            dist/islandbar.exe
-            dist/uia-dump.exe
-            dist/*.zip
+          subject-path: dist/floatbar.exe
 
       - name: Upload workflow artifact
         uses: actions/upload-artifact@v4
         with:
-          name: IslandBar-${{ github.run_number }}
+          name: FloatBar-${{ github.run_number }}
           path: dist/
 
       - name: Publish release
@@ -86,11 +77,11 @@ jobs:
 
             **Checksum:** compare with `SHA256SUMS.txt` from this release.
             ```powershell
-            Get-FileHash .\islandbar.exe -Algorithm SHA256
+            Get-FileHash .\floatbar.exe -Algorithm SHA256
             ```
 
             **Build provenance:** proves the file was built from this repository by GitHub Actions
             (needs the GitHub CLI, https://cli.github.com).
             ```powershell
-            gh attestation verify .\islandbar.exe --repo ${{ github.repository }}
+            gh attestation verify .\floatbar.exe --repo ${{ github.repository }}
             ```

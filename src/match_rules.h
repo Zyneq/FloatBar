@@ -1,10 +1,10 @@
 #pragma once
 
-// Every identifier IslandBar relies on lives in this file.
-// If a Windows update changes the taskbar, run uia-dump.exe, compare, and
-// update the values below. Nothing else should need to change.
+// Every identifier FloatBar relies on lives in this file.
+// If a Windows update changes the taskbar, run `floatbar.exe --dump dump.txt`,
+// compare, and update the values below. Nothing else should need to change.
 //
-// Observed on Windows 11 25H2 (build 26200.9457) with uia-dump:
+// Observed on Windows 11 25H2 (build 26200.9457):
 //
 //   Pane  cls="Taskbar.TaskbarFrameAutomationPeer" aid="TaskbarFrame"   <- app side root
 //     Group aid="TaskbarFrameRepeater"
@@ -24,7 +24,7 @@
 #include <string>
 #include <string_view>
 
-namespace ib::rules {
+namespace fb::rules {
 
 // ---- App side ------------------------------------------------------------
 // Every visible Button under this element belongs to the app side. Buttons are
@@ -81,4 +81,4 @@ bool InList(const std::wstring& value, const std::wstring_view (&list)[N]) {
     return false;
 }
 
-}  // namespace ib::rules
+}  // namespace fb::rules
